@@ -1,0 +1,189 @@
+@import "tailwindcss";
+
+:root {
+  --electric-blue: #009FFD;
+  --cyan-glow: #00E5FF;
+  --deep-navy: #07121A;
+  --dark-bg: #0C1E2C;
+  --neutral-gray: #D9DCE1;
+  --alert-red: #FF4D4D;
+  --alert-orange: #FFB02E;
+  --safe-green: #28B463;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--deep-navy);
+  color: var(--neutral-gray);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Neon glow utilities */
+.neon-glow {
+  box-shadow: 0 0 10px rgba(0, 229, 255, 0.3),
+              0 0 20px rgba(0, 229, 255, 0.2),
+              0 0 30px rgba(0, 229, 255, 0.1);
+}
+
+.neon-glow-hover:hover {
+  box-shadow: 0 0 15px rgba(0, 229, 255, 0.5),
+              0 0 30px rgba(0, 229, 255, 0.3),
+              0 0 45px rgba(0, 229, 255, 0.2);
+}
+
+.neon-border {
+  border: 1px solid rgba(0, 229, 255, 0.3);
+}
+
+.neon-text {
+  text-shadow: 0 0 10px rgba(0, 229, 255, 0.5),
+               0 0 20px rgba(0, 229, 255, 0.3);
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--deep-navy);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--electric-blue);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--cyan-glow);
+}
+
+/* Animations */
+@keyframes pulse-glow {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+.pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.5s ease-out forwards;
+}
+
+@keyframes scale-in {
+  from {
+    transform: scale(0.9);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.animate-scale-in {
+  animation: scale-in 0.3s ease-out forwards;
+}
+
+@keyframes slide-up {
+  from {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.animate-slide-up {
+  animation: slide-up 0.3s ease-out forwards;
+}
+
+/* Strong neon glow for modals */
+.neon-glow-strong {
+  box-shadow: 0 0 20px rgba(0, 229, 255, 0.4),
+              0 0 40px rgba(0, 229, 255, 0.3),
+              0 0 60px rgba(0, 229, 255, 0.2),
+              0 0 80px rgba(0, 229, 255, 0.1);
+}
+
+/* Tool panel slide-in animation */
+@keyframes panel-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(-10px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+.animate-panel-in {
+  animation: panel-slide-in 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Tool button hover glow */
+.tool-btn-glow:hover {
+  box-shadow: 0 4px 16px rgba(59, 130, 246, 0.12),
+              0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+/* ─── Light Mode ─────────────────────────────────────────── */
+/* No CSS filter — precise class-by-class overrides */
+
+.light-mode {
+  background-color: #EEF2F7;
+  color: #1E293B;
+}
+
+.light-mode .neon-glow {
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06), 0 1px 3px rgba(0,0,0,0.04);
+}
+.light-mode .neon-glow-strong {
+  box-shadow: 0 4px 16px rgba(0,0,0,0.09), 0 2px 6px rgba(0,0,0,0.06);
+}
+.light-mode .neon-text {
+  text-shadow: none;
+  color: #0369A1;
+}
+.light-mode .neon-border {
+  border-color: rgba(2,132,199,0.25);
+}
+
+/* Scrollbar in light mode */
+.light-mode ::-webkit-scrollbar-track {
+  background: #DDE6F0;
+}
+.light-mode ::-webkit-scrollbar-thumb {
+  background: #93B5CC;
+}
+.light-mode ::-webkit-scrollbar-thumb:hover {
+  background: #5B8FAD;
+}

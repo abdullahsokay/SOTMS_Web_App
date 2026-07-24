@@ -1,0 +1,184 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helpers ──
+
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuth() &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    function isAdminOrManager() {
+      return isAuth() &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'fleet_manager'];
+    }
+
+    function isOwner(userId) {
+      return isAuth() && request.auth.uid == userId;
+    }
+
+    // ════════════════════════════════════════════
+    //  USERS
+    // ════════════════════════════════════════════
+    match /users/{userId} {
+      allow read:   if isOwner(userId) || isAdminOrManager();
+      // Doc ID is pinned to the caller's UID; new accounts cannot self-assign a role.
+      allow create: if isOwner(userId)
+                       && request.resource.data.role == 'user';
+      // Admins may change anything; owners may update their own doc but NOT their role.
+      allow update: if isAdmin()
+                       || (isOwner(userId)
+                           && request.resource.data.role == resource.data.role);
+      allow delete: if isAdmin();
+    }
+
+    // ════════════════════════════════════════════
+    //  FLEET — Tankers & Devices
+    // ════════════════════════════════════════════
+    match /tankers/{tankerId} {
+      allow read:   if isAuth();
+      allow create: if isAdminOrManager();
+      allow update: if isAuth();
+      allow delete: if isAdmin();
+    }
+
+    match /devices/{deviceId} {
+      allow read:   if isAuth();
+      allow create: if isAdminOrManager();
+      allow update: if isAuth();
+      allow delete: if isAdmin();
+    }
+
+    // ════════════════════════════════════════════
+    //  SENSOR DATA
+    // ════════════════════════════════════════════
+    match /sensors/{sensorId} {
+      allow read:  if isAuth();
+      allow write: if isAuth();
+    }
+
+    match /sensorReadings/{readingId} {
+      allow read:           if isAuth();
+      allow create:         if isAuth();
+      allow update, delete: if isAdmin();
+    }
+
+    // ════════════════════════════════════════════
+    //  DRIVERS
+    // ════════════════════════════════════════════
+    match /drivers/{driverId} {
+      allow read:   if isAuth();
+      allow create: if isAdminOrManager();
+      allow update: if isAuth();
+      allow delete: if isAdmin();
+    }
+
+    // ════════════════════════════════════════════
+    //  ROUTES & ASSIGNMENTS
+    // ════════════════════════════════════════════
+    match /routes/{routeId} {
+      allow read:   if isAuth();
+      allow create: if isAdminOrManager();
+      allow update: if isAuth();
+      allow delete: if isAdmin();
+    }
+
+    match /assignments/{assignmentId} {
+      allow read:   if isAuth();
+      allow create: if isAdminOrManager();
+      allow update: if isAuth();
+      allow delete: if isAdmin();
+    }
+
+    // ════════════════════════════════════════════
+    //  TRIPS
+    // ════════════════════════════════════════════
+    match /trips/{tripId} {
+      allow read:   if isAuth();
+      allow create: if isAdminOrManager();
+      allow update: if isAuth();
+      allow delete: if isAdmin();
+    }
+
+    // ════════════════════════════════════════════
+    //  SAFETY — Alerts, Incidents, Blackspots, Geofences
+    // ════════════════════════════════════════════
+    match /alerts/{alertId} {
+      allow read:   if isAuth();
+      allow create: if isAuth();
+      allow update: if isAuth();
+      allow delete: if isAdmin();
+    }
+
+    match /incidents/{incidentId} {
+      allow read:   if isAuth();
+      allow create: if isAuth();
+      allow update: if isAuth();
+      allow delete: if isAdmin();
+    }
+
+    match /blackspots/{blackspotId} {
+      allow read:   if isAuth();
+      allow create: if isAdminOrManager();
+      allow update: if isAuth();
+      allow delete: if isAdmin();
+    }
+
+    match /geofences/{geofenceId} {
+      allow read:   if isAuth();
+      allow create: if isAdminOrManager();
+      allow update: if isAuth();
+      allow delete: if isAdmin();
+    }
+
+    // ════════════════════════════════════════════
+    //  REPORTS
+    // ════════════════════════════════════════════
+    match /reports/{reportId} {
+      allow read:   if isAuth();
+      allow create: if isAuth();
+      allow update: if isAuth();
+      allow delete: if isAdmin();
+    }
+
+    // ════════════════════════════════════════════
+    //  GPS HISTORY
+    // ════════════════════════════════════════════
+    match /gps_history/{vehicleId}/points/{pointId} {
+      allow read:   if isAuth();
+      allow create: if isAuth();
+      allow update, delete: if isAdmin();
+    }
+
+    // ════════════════════════════════════════════
+    //  SYSTEM CONFIG — admin only write
+    // ════════════════════════════════════════════
+    match /systemConfig/{configId} {
+      allow read:  if isAuth();
+      allow write: if isAdmin();
+    }
+
+    // ════════════════════════════════════════════
+    //  MAIL — triggered emails (Firebase Extension)
+    // ════════════════════════════════════════════
+    match /mail/{mailId} {
+      allow create: if isAdminOrManager();
+      allow read:   if isAdmin();
+    }
+
+    // ════════════════════════════════════════════
+    //  DEVICE SECRETS — server-only
+    // ════════════════════════════════════════════
+    // Per-device provisioning secret hashes, written/read only by Cloud
+    // Functions via the Admin SDK (which bypasses these rules). No client
+    // may ever read or write them.
+    match /deviceSecrets/{deviceId} {
+      allow read, write: if false;
+    }
+  }
+}

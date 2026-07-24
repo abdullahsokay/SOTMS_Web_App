@@ -1,0 +1,226 @@
+{
+  "rules": {
+
+    // ──────────────────────────────────────────────
+    // /devices/{deviceId}  — ESP boards write here
+    // ──────────────────────────────────────────────
+    "devices": {
+      "$deviceId": {
+        ".read": "auth != null",
+        // SECURITY: was `true` (world-writable). A device may write ONLY its own
+        // node, authenticated with a custom token minted by mintDeviceToken
+        // (uid == deviceId, custom claim device == true). Human accounts cannot
+        // write here — they lack the `device` claim.
+        ".write": "auth != null && auth.token.device == true && auth.uid == $deviceId",
+        "$other": { ".validate": false },
+
+        "latest": {
+          ".validate": "newData.hasChildren()",
+          "timestamp":  { ".validate": "newData.isNumber() || newData.isString()" },
+          "distance_cm":{ ".validate": "newData.isNumber()" },
+          "rssi":       { ".validate": "newData.isNumber()" },
+          "uptime_ms":  { ".validate": "newData.isNumber()" },
+          "gps": {
+            "latitude":  { ".validate": "newData.isNumber()" },
+            "longitude": { ".validate": "newData.isNumber()" },
+            "satellites":{ ".validate": "newData.isNumber()" },
+            "status":    { ".validate": "newData.isString()" }
+          }
+        },
+
+        "readings": {
+          ".read": "auth != null",
+          ".write": "auth != null && auth.token.device == true && auth.uid == $deviceId"
+        },
+
+        "lastSeen": {
+          ".validate": "newData.isNumber()"
+        }
+      }
+    },
+
+    // ──────────────────────────────────────────────
+    // /config  — system-wide configuration
+    // ──────────────────────────────────────────────
+    "config": {
+      ".read": "auth != null",
+
+      "deviceTankerMap": {
+        ".write": "auth != null",
+        "$deviceId": {
+          ".validate": "newData.hasChildren(['tankerId', 'tankerName'])",
+          "tankerId":   { ".validate": "newData.isString()" },
+          "tankerName": { ".validate": "newData.isString()" },
+          "driver":     { ".validate": "newData.isString()" }
+        }
+      },
+
+      "thresholds": {
+        ".write": "auth != null",
+        "speedLimit":       { ".validate": "newData.isNumber()" },
+        "harshBrakeDrop":   { ".validate": "newData.isNumber()" },
+        "idleWarnMinutes":  { ".validate": "newData.isNumber()" },
+        "offlineTimeout":   { ".validate": "newData.isNumber()" },
+        "staleTimeout":     { ".validate": "newData.isNumber()" }
+      },
+
+      "metadata": {
+        ".write": "auth != null",
+        "appVersion": { ".validate": "newData.isString()" },
+        "lastUpdated":{ ".validate": "newData.isNumber()" },
+        "projectName":{ ".validate": "newData.isString()" }
+      }
+    },
+
+    // ──────────────────────────────────────────────
+    // /fleet/{tankerId}  — organized tanker data
+    // ──────────────────────────────────────────────
+    "fleet": {
+      ".read": "auth != null",
+      "$tankerId": {
+        ".write": "auth != null",
+
+        "info": {
+          ".validate": "newData.hasChildren(['name'])",
+          "name":           { ".validate": "newData.isString()" },
+          "registrationNo": { ".validate": "newData.isString()" },
+          "capacity":       { ".validate": "newData.isNumber()" },
+          "deviceId":       { ".validate": "newData.isString()" },
+          "driver":         { ".validate": "newData.isString()" },
+          "company":        { ".validate": "newData.isString()" }
+        },
+
+        "currentStatus": {
+          "online":    { ".validate": "newData.isBoolean()" },
+          "status":    { ".validate": "newData.isString()" },
+          "speed":     { ".validate": "newData.isNumber()" },
+          "fuelLevel": { ".validate": "newData.isNumber()" },
+          "lastSeen":  { ".validate": "newData.isNumber()" },
+          "location": {
+            "lat":     { ".validate": "newData.isNumber()" },
+            "lng":     { ".validate": "newData.isNumber()" },
+            "address": { ".validate": "newData.isString()" }
+          }
+        },
+
+        "history": {
+          "$timestamp": {
+            ".validate": "newData.hasChildren()",
+            "gps": {
+              "latitude":  { ".validate": "newData.isNumber()" },
+              "longitude": { ".validate": "newData.isNumber()" },
+              "satellites":{ ".validate": "newData.isNumber()" },
+              "status":    { ".validate": "newData.isString()" }
+            },
+            "distance_cm":{ ".validate": "newData.isNumber()" },
+            "rssi":       { ".validate": "newData.isNumber()" },
+            "uptime_ms":  { ".validate": "newData.isNumber()" },
+            "deviceId":   { ".validate": "newData.isString()" }
+          }
+        }
+      }
+    },
+
+    // ──────────────────────────────────────────────
+    // /alerts/{tankerId}  — per-tanker alerts
+    // ──────────────────────────────────────────────
+    "alerts": {
+      ".read": "auth != null",
+      "$tankerId": {
+        ".write": "auth != null",
+        "$alertId": {
+          ".validate": "newData.hasChildren(['type', 'timestamp'])",
+          "type":       { ".validate": "newData.isString()" },
+          "deviceId":   { ".validate": "newData.isString()" },
+          "tankerName": { ".validate": "newData.isString()" },
+          "timestamp":  { ".validate": "newData.isNumber()" },
+          "message":    { ".validate": "newData.isString()" },
+          "resolved":   { ".validate": "newData.isBoolean()" }
+        }
+      }
+    },
+
+    // ──────────────────────────────────────────────
+    // /driverBehaviour  — driver monitoring events
+    // ──────────────────────────────────────────────
+    "driverBehaviour": {
+      ".read": "auth != null",
+
+      "events": {
+        ".write": "auth != null",
+        "$eventId": {
+          ".validate": "newData.hasChildren(['type', 'timestamp', 'driverId', 'tankerId'])",
+          "driverId":   { ".validate": "newData.isString()" },
+          "driverName": { ".validate": "newData.isString()" },
+          "tankerId":   { ".validate": "newData.isString()" },
+          "tankerName": { ".validate": "newData.isString()" },
+          "type":       { ".validate": "newData.val() == 'overspeeding' || newData.val() == 'harsh_braking' || newData.val() == 'excessive_idle' || newData.val() == 'route_deviation'" },
+          "value":      { ".validate": "newData.isNumber()" },
+          "threshold":  { ".validate": "newData.isNumber()" },
+          "timestamp":  { ".validate": "newData.isNumber()" },
+          "location": {
+            "lat": { ".validate": "newData.isNumber()" },
+            "lng": { ".validate": "newData.isNumber()" }
+          }
+        }
+      },
+
+      "scores": {
+        ".write": "auth != null",
+        "$driverId": {
+          "safetyScore":   { ".validate": "newData.isNumber()" },
+          "overspeedCount":{ ".validate": "newData.isNumber()" },
+          "harshBrakeCount":{ ".validate": "newData.isNumber()" },
+          "idleMinutes":   { ".validate": "newData.isNumber()" },
+          "deviationCount":{ ".validate": "newData.isNumber()" },
+          "lastUpdated":   { ".validate": "newData.isNumber()" }
+        }
+      }
+    },
+
+    // ──────────────────────────────────────────────
+    // /tankers/{tankerId}  — legacy path (keep working)
+    // ──────────────────────────────────────────────
+    "tankers": {
+      ".read": "auth != null",
+      "$tankerId": {
+        ".write": "auth != null",
+        "history": {
+          "$timestamp": {
+            ".validate": "newData.hasChildren()"
+          }
+        }
+      }
+    },
+
+    // ──────────────────────────────────────────────
+    // /realtimeData  — legacy path from firebaseService.ts
+    // ──────────────────────────────────────────────
+    "realtimeData": {
+      ".read": "auth != null",
+      "$deviceId": {
+        ".write": "auth != null"
+      }
+    },
+
+    // ──────────────────────────────────────────────
+    // /activeAlerts  — legacy path from firebaseService.ts
+    // ──────────────────────────────────────────────
+    "activeAlerts": {
+      ".read": "auth != null",
+      "$tankerId": {
+        ".write": "auth != null"
+      }
+    },
+
+    // ──────────────────────────────────────────────
+    // /tracking  — legacy path for vehicle tracking
+    // ──────────────────────────────────────────────
+    "tracking": {
+      ".read": "auth != null",
+      "$vehicleId": {
+        ".write": "auth != null"
+      }
+    }
+  }
+}

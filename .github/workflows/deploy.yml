@@ -1,0 +1,46 @@
+name: Deploy to Firebase Hosting
+
+# Auto-deploys the built site to Firebase Hosting on every push to main.
+# ONLY deploys hosting — Firestore rules, RTDB rules, and Cloud Functions are
+# deployed manually (see README / functions/DEVICE_AUTH.md) because of their
+# ordering + Blaze-plan prerequisites.
+#
+# Credentials: this workflow does NOT log in interactively. It authenticates
+# with a Google service-account key stored as the GitHub secret
+# FIREBASE_SERVICE_ACCOUNT_SOTMS (see setup steps in the PR/commit notes).
+# Never commit the key file itself.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build_and_deploy:
+    name: Build & Deploy (hosting)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Build
+        run: npm run build
+
+      - name: Deploy to Firebase Hosting (live channel)
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_SOTMS }}
+          channelId: live
+          projectId: sotms-abdullah-new-2026
