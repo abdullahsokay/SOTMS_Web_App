@@ -1,7 +1,8 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Users, Plus, CheckCircle2, XCircle } from 'lucide-react';
-import { collection, onSnapshot, query, orderBy, addDoc, updateDoc, deleteDoc, doc } from 'firebase/firestore';
+import { collection, onSnapshot, query, orderBy, addDoc, updateDoc, deleteDoc, doc, where } from 'firebase/firestore';
 import { db } from '../../firebase';
+import { useCompany } from '../../contexts/CompanyContext';
 import { Driver, Route } from '../../types';
 import { PageHeader } from '../Layout/PageHeader';
 import { DriverSummaryCards } from './DriverSummaryCards';
@@ -12,6 +13,7 @@ import { DriverDetailsModal } from './DriverDetailsModal';
 import { DeleteConfirmModal } from './DeleteConfirmModal';
 
 export function DriverManagementPage() {
+  const { companyId } = useCompany();
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [routes, setRoutes] = useState<Route[]>([]);
   const [loading, setLoading] = useState(true);
@@ -38,9 +40,18 @@ export function DriverManagementPage() {
   // Notifications
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
-  // Fetch drivers from Firestore
+  // Fetch drivers from Firestore (tenant-scoped)
   useEffect(() => {
-    const q = query(collection(db, 'drivers'), orderBy('createdAt', 'desc'));
+    if (!companyId) {
+      setDrivers([]);
+      setLoading(false);
+      return;
+    }
+    const q = query(
+      collection(db, 'drivers'),
+      where('companyId', '==', companyId),
+      orderBy('createdAt', 'desc')
+    );
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const fetchedDrivers = snapshot.docs.map(d => ({
         ...d.data(),
@@ -52,11 +63,15 @@ export function DriverManagementPage() {
       setLoading(false);
     });
     return () => unsubscribe();
-  }, []);
+  }, [companyId]);
 
-  // Fetch routes for active assignment checking
+  // Fetch routes for active assignment checking (tenant-scoped)
   useEffect(() => {
-    const q = query(collection(db, 'routes'));
+    if (!companyId) {
+      setRoutes([]);
+      return;
+    }
+    const q = query(collection(db, 'routes'), where('companyId', '==', companyId));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const fetchedRoutes = snapshot.docs.map(d => ({
         ...d.data(),
@@ -65,7 +80,7 @@ export function DriverManagementPage() {
       setRoutes(fetchedRoutes);
     });
     return () => unsubscribe();
-  }, []);
+  }, [companyId]);
 
   // Auto-dismiss notification
   useEffect(() => {
@@ -166,10 +181,15 @@ export function DriverManagementPage() {
 
   // CRUD Handlers
   const handleCreateDriver = async (data: Partial<Driver>) => {
+    if (!companyId) {
+      showNotification('Account setup incomplete. Cannot create driver.', 'error');
+      throw new Error('Missing companyId');
+    }
     try {
       const driverData = {
         ...data,
         driverId: generateDriverId(),
+        companyId,
       };
       // Strip undefined values
       const cleanData = Object.fromEntries(

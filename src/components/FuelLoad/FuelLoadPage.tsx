@@ -4,6 +4,7 @@ import { collection, addDoc, query, where, getDocs } from 'firebase/firestore';
 import { Timestamp } from 'firebase/firestore';
 import { db, auth } from '../../firebase';
 import { Tanker } from '../../types';
+import { useCompany } from '../../contexts/CompanyContext';
 import { useGPSData } from '../../hooks/useGPSData';
 import { useAlerts, FuelAlert } from '../../contexts/AlertsContext';
 import { createIncident, updateActiveAlert } from '../../services/firebaseService';
@@ -20,6 +21,7 @@ interface ExtendedTanker extends Tanker {
 }
 
 export function FuelLoadPage() {
+  const { companyId } = useCompany();
   const { tankers, recentReadings } = useGPSData();
   // Hatch-breach detection, alert state, and the audible alarm now live in the
   // global AlertsProvider so they survive navigation away from this page.
@@ -82,11 +84,15 @@ export function FuelLoadPage() {
     incidentType: string,
     severity: string
   ) => {
+    // Never write tenant docs without a companyId.
+    if (!companyId) return;
+
     const today = new Date().toISOString().split('T')[0];
 
     // De-duplicate: check if an auto-recorded report already exists for this tanker today
     const existingQuery = query(
       collection(db, 'reports'),
+      where('companyId', '==', companyId),
       where('tankerId', '==', tanker.id),
       where('date', '==', today),
       where('source', '==', 'auto')
@@ -105,6 +111,7 @@ export function FuelLoadPage() {
 
     // 1. Save incident
     const result = await createIncident({
+      companyId,
       tankerId: tanker.id,
       tripId: null,
       alertId: null,
@@ -156,6 +163,7 @@ export function FuelLoadPage() {
       details: description,
       status: reportStatus,
       source: 'auto',
+      companyId,
     });
 
     // 4. Send email alert
@@ -193,7 +201,7 @@ export function FuelLoadPage() {
         },
       });
     }
-  }, []);
+  }, [companyId]);
 
   // Detect status changes and fire notifications
   useEffect(() => {

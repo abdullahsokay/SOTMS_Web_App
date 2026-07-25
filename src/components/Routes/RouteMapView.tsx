@@ -4,8 +4,9 @@ import { Route, Tanker, BlackSpot, Geofence, GeofenceType, GeofenceAlertOn } fro
 import { TrackingStore } from '../../types/tracking';
 import { Layers, List, AlertTriangle, MapPin, Eye, EyeOff, Target, Trash2, Navigation, ChevronDown, ChevronUp, Info, Search, Loader2, MousePointer, Route as RouteIcon, Shield, X, Save, Truck, Zap, GripVertical, PenTool, Satellite, Map as MapIcon } from 'lucide-react';
 import { useGoogleMaps } from '../../contexts/GoogleMapsContext';
-import { collection, addDoc, onSnapshot, deleteDoc, doc } from 'firebase/firestore';
+import { collection, addDoc, onSnapshot, deleteDoc, doc, query, where } from 'firebase/firestore';
 import { db } from '../../firebase';
+import { useCompany } from '../../contexts/CompanyContext';
 import { darkMapStyle, containerStyle, defaultCenter, getMarkerIcon } from '../../utils/mapUtils';
 import { AnimatedVehicleMarker } from '../Map/AnimatedVehicleMarker';
 import { PlacesAutocompleteInput } from './PlacesAutocompleteInput';
@@ -139,6 +140,7 @@ export function RouteMapView({
   onAssignRoute,
 }: RouteMapViewProps) {
   const { isLoaded, loadError } = useGoogleMaps();
+  const { companyId } = useCompany();
   const [map, setMap] = useState<google.maps.Map | null>(null);
 
   const [showTraffic, setShowTraffic] = useState(false);
@@ -451,6 +453,10 @@ export function RouteMapView({
     notes: string;
   }) => {
     if (!pendingBlackSpot) return;
+    if (!companyId) {
+      console.error('[RouteMapView] Cannot save black spot: no companyId');
+      return;
+    }
     try {
       await addDoc(collection(db, 'blackspots'), {
         name: data.name,
@@ -460,6 +466,7 @@ export function RouteMapView({
         confidenceLevel: data.confidenceLevel,
         notes: data.notes || undefined,
         createdAt: new Date().toISOString(),
+        companyId,
       });
     } catch (err) {
       console.error('[RouteMapView] Error saving black spot:', err);
@@ -467,11 +474,15 @@ export function RouteMapView({
     setPendingBlackSpot(null);
     setShowBlackSpotModal(false);
     setInteractionMode('none');
-  }, [pendingBlackSpot]);
+  }, [pendingBlackSpot, companyId]);
 
-  // Fetch saved geofences from Firestore
+  // Fetch saved geofences from Firestore (tenant-scoped)
   useEffect(() => {
-    const unsub = onSnapshot(collection(db, 'geofences'), (snap) => {
+    if (!companyId) {
+      setGeofences([]);
+      return;
+    }
+    const unsub = onSnapshot(query(collection(db, 'geofences'), where('companyId', '==', companyId)), (snap) => {
       const data = snap.docs.map(d => {
         const raw = d.data();
         return {
@@ -490,7 +501,7 @@ export function RouteMapView({
       setGeofences(data);
     });
     return () => unsub();
-  }, []);
+  }, [companyId]);
 
   // ESC key to cancel any mode or pending modal
   useEffect(() => {
@@ -648,6 +659,10 @@ export function RouteMapView({
     notes: string;
   }) => {
     if (!pendingGeofence) return;
+    if (!companyId) {
+      console.error('[RouteMapView] Cannot save geofence: no companyId');
+      return;
+    }
     try {
       await addDoc(collection(db, 'geofences'), {
         center: pendingGeofence,
@@ -659,13 +674,14 @@ export function RouteMapView({
         active: true,
         notes: data.notes || undefined,
         createdAt: new Date().toISOString(),
+        companyId,
       });
     } catch (err) {
       console.error('[RouteMapView] Error saving geofence:', err);
     }
     setPendingGeofence(null);
     setShowGeofenceModal(false);
-  }, [pendingGeofence]);
+  }, [pendingGeofence, companyId]);
 
   const handleDeleteGeofence = async (id: string) => {
     try {

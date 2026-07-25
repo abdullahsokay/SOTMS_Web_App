@@ -3,6 +3,7 @@ import { Droplet, Building, MapPin, Truck, User, CreditCard, Phone, Mail, Lock, 
 import { createUserWithEmailAndPassword } from 'firebase/auth';
 import { doc, setDoc } from 'firebase/firestore';
 import { auth, db } from '../../firebase';
+import type { CompanyType } from '../../types/tenant';
 
 interface RegisterPageProps {
   onRegister: (data: any) => void;
@@ -14,6 +15,7 @@ export function RegisterPage({ onRegister, onNavigateToLogin, backgroundImage }:
   const [formData, setFormData] = useState({
     companyName: '',
     companyLocation: '',
+    companyType: 'fleet_owner' as CompanyType,
     fleetSize: '',
     fullName: '',
     cnic: '',
@@ -45,9 +47,12 @@ export function RegisterPage({ onRegister, onNavigateToLogin, backgroundImage }:
   const validateForm = () => {
     const newErrors: any = {};
 
+    const isFleetOwner = formData.companyType === 'fleet_owner';
+
     if (!formData.companyName) newErrors.companyName = 'Company name is required';
     if (!formData.companyLocation) newErrors.companyLocation = 'Company location is required';
-    if (!formData.fleetSize) newErrors.fleetSize = 'Fleet size is required';
+    // Fleet size only applies to fleet owners (contractors own no tankers).
+    if (isFleetOwner && !formData.fleetSize) newErrors.fleetSize = 'Fleet size is required';
 
     if (!formData.fullName) {
       newErrors.fullName = 'Full name is required';
@@ -55,10 +60,13 @@ export function RegisterPage({ onRegister, onNavigateToLogin, backgroundImage }:
       newErrors.fullName = 'Full name should only contain characters';
     }
 
-    if (!formData.cnic) {
-      newErrors.cnic = 'CNIC is required';
-    } else if (!/^\d{13}$/.test(formData.cnic)) {
-      newErrors.cnic = 'CNIC must be exactly 13 digits';
+    // CNIC only required for fleet owners; contractors are corporate accounts.
+    if (isFleetOwner) {
+      if (!formData.cnic) {
+        newErrors.cnic = 'CNIC is required';
+      } else if (!/^\d{13}$/.test(formData.cnic)) {
+        newErrors.cnic = 'CNIC must be exactly 13 digits';
+      }
     }
 
     if (!formData.phone) {
@@ -95,10 +103,24 @@ export function RegisterPage({ onRegister, onNavigateToLogin, backgroundImage }:
       // 1. Create User in Auth
       const userCredential = await createUserWithEmailAndPassword(auth, formData.email, formData.password);
       const user = userCredential.user;
+      const companyId = user.uid; // this account founds the company; id = uid
 
-      // 2. Store additional details in Firestore
+      // 2a. Create the company this account owns
+      await setDoc(doc(db, "companies", companyId), {
+        ownerUid: user.uid,
+        name: formData.companyName,
+        location: formData.companyLocation,
+        type: formData.companyType,
+        fleetSize: formData.fleetSize ? Number(formData.fleetSize) : null,
+        createdAt: new Date().toISOString(),
+      });
+
+      // 2b. Create the founding admin user, linked to the company
       await setDoc(doc(db, "users", user.uid), {
         uid: user.uid,
+        companyId,
+        companyType: formData.companyType,
+        role: 'admin', // company admin (scoped by companyId)
         companyName: formData.companyName,
         companyLocation: formData.companyLocation,
         fleetSize: formData.fleetSize,
@@ -108,10 +130,7 @@ export function RegisterPage({ onRegister, onNavigateToLogin, backgroundImage }:
         email: formData.email,
         username: formData.username, // Keeping username in DB though Auth uses email
         createdAt: new Date().toISOString(),
-        role: 'user' // Default role
       });
-
-      console.log("User registered successfully:", user.uid);
 
       // 3. Notify Parent Component
       onRegister({ ...formData, uid: user.uid });
@@ -165,7 +184,7 @@ export function RegisterPage({ onRegister, onNavigateToLogin, backgroundImage }:
                 <Droplet className="w-8 h-8 text-white" />
               </div>
               <h1 className="text-2xl text-white neon-text mb-1">Create Account</h1>
-              <p className="text-sm text-[#D9DCE1]/60">Register your fleet with SOTMS</p>
+              <p className="text-sm text-[#D9DCE1]/60">Register your company with SOTMS</p>
             </div>
 
             {/* Error Message */}
@@ -180,6 +199,30 @@ export function RegisterPage({ onRegister, onNavigateToLogin, backgroundImage }:
               {/* Company Information */}
               <div>
                 <h3 className="text-sm text-[#00E5FF] mb-3">Company Information</h3>
+
+                {/* Account type — fleet owner vs contractor */}
+                <div className="mb-4">
+                  <label className="block text-xs text-[#D9DCE1]/70 mb-2">Account Type</label>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setFormData({ ...formData, companyType: 'fleet_owner' })}
+                      className={`flex flex-col items-start gap-1 p-3 rounded-lg border text-left transition-all ${formData.companyType === 'fleet_owner' ? 'bg-[#009FFD]/20 border-[#00E5FF]/50' : 'bg-[#07121A] border-[#00E5FF]/20 hover:border-[#00E5FF]/40'}`}
+                    >
+                      <span className="flex items-center gap-2 text-sm text-white"><Truck className="w-4 h-4 text-[#00E5FF]" /> Fleet Owner</span>
+                      <span className="text-[11px] text-[#D9DCE1]/60">I own tankers</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFormData({ ...formData, companyType: 'contractor' })}
+                      className={`flex flex-col items-start gap-1 p-3 rounded-lg border text-left transition-all ${formData.companyType === 'contractor' ? 'bg-[#009FFD]/20 border-[#00E5FF]/50' : 'bg-[#07121A] border-[#00E5FF]/20 hover:border-[#00E5FF]/40'}`}
+                    >
+                      <span className="flex items-center gap-2 text-sm text-white"><Building className="w-4 h-4 text-[#00E5FF]" /> Contractor</span>
+                      <span className="text-[11px] text-[#D9DCE1]/60">I give oil contracts (PSO, Shell…)</span>
+                    </button>
+                  </div>
+                </div>
+
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
                     <div className="relative">
@@ -211,20 +254,22 @@ export function RegisterPage({ onRegister, onNavigateToLogin, backgroundImage }:
                     {errors.companyLocation && <p className="text-[#FF4D4D] text-xs mt-1">{errors.companyLocation}</p>}
                   </div>
 
-                  <div className="md:col-span-2">
-                    <div className="relative">
-                      <Truck className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#00E5FF]" />
-                      <input
-                        type="number"
-                        name="fleetSize"
-                        value={formData.fleetSize}
-                        onChange={handleChange}
-                        placeholder="Number of Fleet/Vehicles"
-                        className="w-full pl-10 pr-4 py-2.5 bg-[#07121A] border border-[#00E5FF]/30 rounded-lg text-white placeholder-[#D9DCE1]/40 text-sm focus:outline-none focus:border-[#00E5FF] transition-all"
-                      />
+                  {formData.companyType === 'fleet_owner' && (
+                    <div className="md:col-span-2">
+                      <div className="relative">
+                        <Truck className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#00E5FF]" />
+                        <input
+                          type="number"
+                          name="fleetSize"
+                          value={formData.fleetSize}
+                          onChange={handleChange}
+                          placeholder="Number of Fleet/Vehicles"
+                          className="w-full pl-10 pr-4 py-2.5 bg-[#07121A] border border-[#00E5FF]/30 rounded-lg text-white placeholder-[#D9DCE1]/40 text-sm focus:outline-none focus:border-[#00E5FF] transition-all"
+                        />
+                      </div>
+                      {errors.fleetSize && <p className="text-[#FF4D4D] text-xs mt-1">{errors.fleetSize}</p>}
                     </div>
-                    {errors.fleetSize && <p className="text-[#FF4D4D] text-xs mt-1">{errors.fleetSize}</p>}
-                  </div>
+                  )}
                 </div>
               </div>
 
@@ -247,20 +292,22 @@ export function RegisterPage({ onRegister, onNavigateToLogin, backgroundImage }:
                     {errors.fullName && <p className="text-[#FF4D4D] text-xs mt-1">{errors.fullName}</p>}
                   </div>
 
-                  <div>
-                    <div className="relative">
-                      <CreditCard className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#00E5FF]" />
-                      <input
-                        type="text"
-                        name="cnic"
-                        value={formData.cnic}
-                        onChange={handleChange}
-                        placeholder="CNIC"
-                        className="w-full pl-10 pr-4 py-2.5 bg-[#07121A] border border-[#00E5FF]/30 rounded-lg text-white placeholder-[#D9DCE1]/40 text-sm focus:outline-none focus:border-[#00E5FF] transition-all"
-                      />
+                  {formData.companyType === 'fleet_owner' && (
+                    <div>
+                      <div className="relative">
+                        <CreditCard className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#00E5FF]" />
+                        <input
+                          type="text"
+                          name="cnic"
+                          value={formData.cnic}
+                          onChange={handleChange}
+                          placeholder="CNIC"
+                          className="w-full pl-10 pr-4 py-2.5 bg-[#07121A] border border-[#00E5FF]/30 rounded-lg text-white placeholder-[#D9DCE1]/40 text-sm focus:outline-none focus:border-[#00E5FF] transition-all"
+                        />
+                      </div>
+                      {errors.cnic && <p className="text-[#FF4D4D] text-xs mt-1">{errors.cnic}</p>}
                     </div>
-                    {errors.cnic && <p className="text-[#FF4D4D] text-xs mt-1">{errors.cnic}</p>}
-                  </div>
+                  )}
 
                   <div>
                     <div className="relative">

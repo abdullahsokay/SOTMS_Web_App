@@ -15,14 +15,15 @@ import { AlertsPage } from './components/Alerts/AlertsPage';
 import { SettingsPage } from './components/Settings/SettingsPage';
 import { DriverManagementPage } from './components/Drivers/DriverManagementPage';
 import { DriverBehaviourPage } from './components/Drivers/DriverBehaviourPage';
+import { ContractsPage } from './components/Contracts/ContractsPage';
 
-type AppPage = 'login' | 'register' | 'dashboard' | 'tracking' | 'fuel' | 'routes' | 'drivers' | 'behaviour' | 'alerts' | 'reports' | 'settings';
+type AppPage = 'login' | 'register' | 'dashboard' | 'tracking' | 'fuel' | 'routes' | 'drivers' | 'behaviour' | 'alerts' | 'reports' | 'contracts' | 'settings';
 
 export default function App() {
   const { theme } = useTheme();
   const [currentPage, setCurrentPage] = useState<AppPage>(() => {
     const saved = localStorage.getItem('sotms_page');
-    const validPages: AppPage[] = ['login', 'register', 'dashboard', 'tracking', 'fuel', 'routes', 'drivers', 'behaviour', 'alerts', 'reports', 'settings'];
+    const validPages: AppPage[] = ['login', 'register', 'dashboard', 'tracking', 'fuel', 'routes', 'drivers', 'behaviour', 'alerts', 'reports', 'contracts', 'settings'];
     return (validPages.includes(saved as AppPage) ? saved as AppPage : 'login');
   });
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -146,6 +147,7 @@ export default function App() {
             {currentPage === 'drivers' && <DriverManagementPage />}
             {currentPage === 'behaviour' && <DriverBehaviourPage />}
             {currentPage === 'alerts' && <AlertsPage />}
+            {currentPage === 'contracts' && <ContractsPage />}
             {currentPage === 'settings' && <SettingsPage />}
           </div>
         </div>

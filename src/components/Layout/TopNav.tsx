@@ -1,7 +1,8 @@
 import { Bell, Settings, User, LogOut, Menu } from 'lucide-react';
 import { useState, useEffect } from 'react';
-import { collection, onSnapshot } from 'firebase/firestore';
+import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { db, auth } from '../../firebase';
+import { useCompany } from '../../contexts/CompanyContext';
 
 interface TopNavProps {
   onLogout: () => void;
@@ -27,13 +28,18 @@ function isAlertUnresolved(data: Record<string, unknown>): boolean {
 }
 
 export function TopNav({ onLogout, onToggleSidebar, onNavigate }: TopNavProps) {
+  const { companyId } = useCompany();
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [notifications, setNotifications] = useState(0);
 
   // Live count of unresolved alerts from Firestore (drives the bell badge).
   useEffect(() => {
+    if (!companyId) {
+      setNotifications(0);
+      return;
+    }
     const unsubscribe = onSnapshot(
-      collection(db, 'alerts'),
+      query(collection(db, 'alerts'), where('companyId', '==', companyId)),
       (snapshot) => {
         const unresolved = snapshot.docs.filter((doc) => isAlertUnresolved(doc.data())).length;
         setNotifications(unresolved);
@@ -44,7 +50,7 @@ export function TopNav({ onLogout, onToggleSidebar, onNavigate }: TopNavProps) {
     );
 
     return () => unsubscribe();
-  }, []);
+  }, [companyId]);
 
   const userLabel = auth.currentUser?.displayName || auth.currentUser?.email || 'User';
 

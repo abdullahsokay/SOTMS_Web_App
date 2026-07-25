@@ -2,181 +2,241 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // ── Helpers ──
-
+    // ─────────────────────────────────────────────────────────────
+    //  Helpers — multi-tenant isolation
+    // ─────────────────────────────────────────────────────────────
     function isAuth() {
       return request.auth != null;
-    }
-
-    function isAdmin() {
-      return isAuth() &&
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
-    }
-
-    function isAdminOrManager() {
-      return isAuth() &&
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'fleet_manager'];
     }
 
     function isOwner(userId) {
       return isAuth() && request.auth.uid == userId;
     }
 
-    // ════════════════════════════════════════════
-    //  USERS
-    // ════════════════════════════════════════════
-    match /users/{userId} {
-      allow read:   if isOwner(userId) || isAdminOrManager();
-      // Doc ID is pinned to the caller's UID; new accounts cannot self-assign a role.
-      allow create: if isOwner(userId)
-                       && request.resource.data.role == 'user';
-      // Admins may change anything; owners may update their own doc but NOT their role.
-      allow update: if isAdmin()
-                       || (isOwner(userId)
-                           && request.resource.data.role == resource.data.role);
-      allow delete: if isAdmin();
+    // The caller's own company id (from their users/{uid} doc).
+    function myCid() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.companyId;
+    }
+
+    function myRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+
+    function isCoAdmin() {
+      return isAuth() && myRole() == 'admin';
+    }
+
+    function isMgr() {
+      return isAuth() && myRole() in ['admin', 'fleet_manager'];
+    }
+
+    // The existing record belongs to my company (fail-closed if no companyId).
+    function owns(rsc) {
+      return isAuth() && rsc.data.companyId == myCid();
+    }
+
+    // The record is shared with my company for an active contract/trip
+    // (Option A) via a `visibleTo` array a Cloud Function maintains.
+    function sharedTo(rsc) {
+      return isAuth()
+        && (rsc.data.visibleTo is list)
+        && (myCid() in rsc.data.visibleTo);
+    }
+
+    // A new record is being created inside my own company.
+    function creatingMine() {
+      return isAuth() && request.resource.data.companyId == myCid();
     }
 
     // ════════════════════════════════════════════
-    //  FLEET — Tankers & Devices
+    //  USERS — scoped to the caller's company
+    // ════════════════════════════════════════════
+    match /users/{userId} {
+      allow read:   if isOwner(userId)
+                       || (isCoAdmin() && resource.data.companyId == myCid());
+      // Self-signup founds a company: companyId == own uid, role == admin.
+      allow create: if isOwner(userId)
+                       && request.resource.data.companyId == request.auth.uid
+                       && request.resource.data.role == 'admin';
+      // Owner may edit own profile but not change role/company; a company admin
+      // may manage users in their own company.
+      allow update: if (isOwner(userId)
+                          && request.resource.data.role == resource.data.role
+                          && request.resource.data.companyId == resource.data.companyId)
+                       || (isCoAdmin() && resource.data.companyId == myCid());
+      allow delete: if isCoAdmin() && resource.data.companyId == myCid();
+    }
+
+    // ════════════════════════════════════════════
+    //  TENANCY — Companies & Contracts
+    // ════════════════════════════════════════════
+    match /companies/{companyId} {
+      // Company profile (name/location) is readable by any authenticated user
+      // so contract partners can see each other's names.
+      allow read:   if isAuth();
+      allow create: if isAuth()
+                       && request.auth.uid == companyId
+                       && request.resource.data.ownerUid == request.auth.uid;
+      allow update: if isAuth() && resource.data.ownerUid == request.auth.uid;
+      allow delete: if false;
+    }
+
+    // A contract is visible to and manageable by BOTH parties it names.
+    match /contracts/{contractId} {
+      allow read:   if isAuth()
+                       && (resource.data.contractorCompanyId == myCid()
+                           || resource.data.fleetOwnerCompanyId == myCid());
+      allow create: if isMgr()
+                       && (request.resource.data.contractorCompanyId == myCid()
+                           || request.resource.data.fleetOwnerCompanyId == myCid());
+      allow update: if isMgr()
+                       && (resource.data.contractorCompanyId == myCid()
+                           || resource.data.fleetOwnerCompanyId == myCid());
+      allow delete: if isCoAdmin()
+                       && (resource.data.contractorCompanyId == myCid()
+                           || resource.data.fleetOwnerCompanyId == myCid());
+    }
+
+    // ════════════════════════════════════════════
+    //  FLEET — Tankers & Devices (fleet-owner owned; tankers shareable)
     // ════════════════════════════════════════════
     match /tankers/{tankerId} {
-      allow read:   if isAuth();
-      allow create: if isAdminOrManager();
-      allow update: if isAuth();
-      allow delete: if isAdmin();
+      allow read:   if owns(resource) || sharedTo(resource);
+      allow create: if creatingMine();
+      allow update: if owns(resource);
+      allow delete: if owns(resource) && isCoAdmin();
     }
 
     match /devices/{deviceId} {
-      allow read:   if isAuth();
-      allow create: if isAdminOrManager();
-      allow update: if isAuth();
-      allow delete: if isAdmin();
+      allow read:   if owns(resource);
+      allow create: if creatingMine();
+      allow update: if owns(resource);
+      allow delete: if owns(resource) && isCoAdmin();
     }
 
     // ════════════════════════════════════════════
-    //  SENSOR DATA
+    //  SENSOR DATA — server-written, immutable
     // ════════════════════════════════════════════
     match /sensors/{sensorId} {
-      allow read:  if isAuth();
-      allow write: if isAuth();
+      allow read:  if owns(resource);
+      allow write: if false; // server (Admin SDK) only
     }
 
+    // Sensor readings are the audit record: written ONLY by Cloud Functions
+    // (Admin SDK bypasses these rules) and never editable/deletable by clients.
     match /sensorReadings/{readingId} {
-      allow read:           if isAuth();
-      allow create:         if isAuth();
-      allow update, delete: if isAdmin();
+      allow read:           if owns(resource) || sharedTo(resource);
+      allow create:         if false;
+      allow update, delete: if false;
     }
 
     // ════════════════════════════════════════════
-    //  DRIVERS
+    //  DRIVERS — fleet-owner only (PII, not shared with contractors)
     // ════════════════════════════════════════════
     match /drivers/{driverId} {
-      allow read:   if isAuth();
-      allow create: if isAdminOrManager();
-      allow update: if isAuth();
-      allow delete: if isAdmin();
+      allow read:   if owns(resource);
+      allow create: if creatingMine();
+      allow update: if owns(resource);
+      allow delete: if owns(resource) && isCoAdmin();
     }
 
     // ════════════════════════════════════════════
-    //  ROUTES & ASSIGNMENTS
+    //  ROUTES & ASSIGNMENTS (routes/assignments shareable to contractor)
     // ════════════════════════════════════════════
     match /routes/{routeId} {
-      allow read:   if isAuth();
-      allow create: if isAdminOrManager();
-      allow update: if isAuth();
-      allow delete: if isAdmin();
+      allow read:   if owns(resource) || sharedTo(resource);
+      allow create: if creatingMine();
+      allow update: if owns(resource);
+      allow delete: if owns(resource) && isCoAdmin();
     }
 
     match /assignments/{assignmentId} {
-      allow read:   if isAuth();
-      allow create: if isAdminOrManager();
-      allow update: if isAuth();
-      allow delete: if isAdmin();
+      allow read:   if owns(resource) || sharedTo(resource);
+      allow create: if creatingMine();
+      allow update: if owns(resource);
+      allow delete: if owns(resource);
     }
 
     // ════════════════════════════════════════════
-    //  TRIPS
+    //  TRIPS (shareable to contractor for their shipment)
     // ════════════════════════════════════════════
     match /trips/{tripId} {
-      allow read:   if isAuth();
-      allow create: if isAdminOrManager();
-      allow update: if isAuth();
-      allow delete: if isAdmin();
+      allow read:   if owns(resource) || sharedTo(resource);
+      allow create: if creatingMine();
+      allow update: if owns(resource);
+      allow delete: if owns(resource) && isCoAdmin();
     }
 
     // ════════════════════════════════════════════
     //  SAFETY — Alerts, Incidents, Blackspots, Geofences
     // ════════════════════════════════════════════
     match /alerts/{alertId} {
-      allow read:   if isAuth();
-      allow create: if isAuth();
-      allow update: if isAuth();
-      allow delete: if isAdmin();
+      allow read:   if owns(resource) || sharedTo(resource);
+      allow create: if creatingMine();
+      allow update: if owns(resource);
+      allow delete: if owns(resource) && isCoAdmin();
     }
 
     match /incidents/{incidentId} {
-      allow read:   if isAuth();
-      allow create: if isAuth();
-      allow update: if isAuth();
-      allow delete: if isAdmin();
+      allow read:   if owns(resource) || sharedTo(resource);
+      allow create: if creatingMine();
+      allow update: if owns(resource);
+      allow delete: if owns(resource) && isCoAdmin();
     }
 
+    // Operational fleet data — not shared with contractors.
     match /blackspots/{blackspotId} {
-      allow read:   if isAuth();
-      allow create: if isAdminOrManager();
-      allow update: if isAuth();
-      allow delete: if isAdmin();
+      allow read:   if owns(resource);
+      allow create: if creatingMine();
+      allow update: if owns(resource);
+      allow delete: if owns(resource);
     }
 
     match /geofences/{geofenceId} {
-      allow read:   if isAuth();
-      allow create: if isAdminOrManager();
-      allow update: if isAuth();
-      allow delete: if isAdmin();
+      allow read:   if owns(resource);
+      allow create: if creatingMine();
+      allow update: if owns(resource);
+      allow delete: if owns(resource);
     }
 
     // ════════════════════════════════════════════
-    //  REPORTS
+    //  REPORTS (shareable to contractor for their shipment)
     // ════════════════════════════════════════════
     match /reports/{reportId} {
-      allow read:   if isAuth();
-      allow create: if isAuth();
-      allow update: if isAuth();
-      allow delete: if isAdmin();
+      allow read:   if owns(resource) || sharedTo(resource);
+      allow create: if creatingMine();
+      allow update: if owns(resource);
+      allow delete: if owns(resource) && isCoAdmin();
     }
 
     // ════════════════════════════════════════════
-    //  GPS HISTORY
+    //  GPS HISTORY — server-written, company-scoped, immutable
     // ════════════════════════════════════════════
     match /gps_history/{vehicleId}/points/{pointId} {
-      allow read:   if isAuth();
-      allow create: if isAuth();
-      allow update, delete: if isAdmin();
+      allow read:           if isAuth() && resource.data.companyId == myCid();
+      allow create:         if false; // server (Admin SDK) only
+      allow update, delete: if false;
     }
 
     // ════════════════════════════════════════════
-    //  SYSTEM CONFIG — admin only write
+    //  SYSTEM CONFIG — app-wide; change via console/Admin SDK only
     // ════════════════════════════════════════════
     match /systemConfig/{configId} {
       allow read:  if isAuth();
-      allow write: if isAdmin();
+      allow write: if false;
     }
 
     // ════════════════════════════════════════════
     //  MAIL — triggered emails (Firebase Extension)
     // ════════════════════════════════════════════
     match /mail/{mailId} {
-      allow create: if isAdminOrManager();
-      allow read:   if isAdmin();
+      allow create: if isMgr();
+      allow read:   if isCoAdmin();
     }
 
     // ════════════════════════════════════════════
-    //  DEVICE SECRETS — server-only
+    //  DEVICE SECRETS — server-only (Admin SDK bypasses rules)
     // ════════════════════════════════════════════
-    // Per-device provisioning secret hashes, written/read only by Cloud
-    // Functions via the Admin SDK (which bypasses these rules). No client
-    // may ever read or write them.
     match /deviceSecrets/{deviceId} {
       allow read, write: if false;
     }

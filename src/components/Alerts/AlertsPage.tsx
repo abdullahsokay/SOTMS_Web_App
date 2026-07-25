@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
 import { CheckCheck, X } from 'lucide-react';
-import { collection, onSnapshot, query, orderBy, limit, updateDoc, doc, writeBatch } from 'firebase/firestore';
+import { collection, onSnapshot, query, orderBy, limit, updateDoc, doc, writeBatch, where } from 'firebase/firestore';
 import { db } from '../../firebase';
+import { useCompany } from '../../contexts/CompanyContext';
 import { AlertsSummaryCards } from './AlertsSummaryCards';
 import { AlertsTable } from './AlertsTable';
 import { AlertFilters } from './AlertFilters';
@@ -31,6 +32,7 @@ export interface Alert {
 }
 
 export function AlertsPage() {
+  const { companyId, companyType } = useCompany();
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [selectedAlert, setSelectedAlert] = useState<Alert | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -40,9 +42,29 @@ export function AlertsPage() {
   const [selectedAlerts, setSelectedAlerts] = useState<Set<string>>(new Set());
   const [, setLoading] = useState(true);
 
-  // Fetch Alerts from Firestore
+  // Fetch Alerts from Firestore (tenant-scoped)
   useEffect(() => {
-    const q = query(collection(db, 'alerts'), orderBy('timestamp', 'desc'), limit(100));
+    if (!companyId) {
+      setAlerts([]);
+      setLoading(false);
+      return;
+    }
+    // Contractors don't own alerts — they may only read alerts explicitly
+    // shared with them (visibleTo carries the contractor company ids during an
+    // active contract). Fleet owners read their own company's alerts.
+    const q = companyType === 'contractor'
+      ? query(
+          collection(db, 'alerts'),
+          where('visibleTo', 'array-contains', companyId),
+          orderBy('timestamp', 'desc'),
+          limit(100)
+        )
+      : query(
+          collection(db, 'alerts'),
+          where('companyId', '==', companyId),
+          orderBy('timestamp', 'desc'),
+          limit(100)
+        );
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const fetchedAlerts = snapshot.docs.map(doc => ({
         id: doc.id,
@@ -56,7 +78,7 @@ export function AlertsPage() {
     });
 
     return () => unsubscribe();
-  }, []);
+  }, [companyId, companyType]);
 
   // Filter alerts
   const filteredAlerts = alerts.filter(alert => {

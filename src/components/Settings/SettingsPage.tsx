@@ -9,6 +9,7 @@ import { NotificationSettings } from './NotificationSettings';
 import { SecuritySettings } from './SecuritySettings';
 import { SystemPreferences } from './SystemPreferences';
 import { DeviceProvisioning } from './DeviceProvisioning';
+import { CompanyIdCard } from './CompanyIdCard';
 
 export function SettingsPage() {
   const { setTheme } = useTheme();
@@ -162,6 +163,9 @@ export function SettingsPage() {
 
       {/* Settings Content */}
       <div className="max-w-5xl space-y-6">
+        {/* Company ID — for contract sharing */}
+        <CompanyIdCard />
+
         {/* Account Settings */}
         <AccountSettings
           data={accountData}

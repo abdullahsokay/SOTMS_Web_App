@@ -1,4 +1,5 @@
-import { Home, MapPin, Droplet, Route, AlertTriangle, FileText, Settings, Users, Shield } from 'lucide-react';
+import { Home, MapPin, Droplet, Route, AlertTriangle, FileText, Settings, Users, Shield, Handshake } from 'lucide-react';
+import { useCompany } from '../../contexts/CompanyContext';
 
 interface SidebarProps {
   currentPage: string;
@@ -14,10 +15,21 @@ const menuItems = [
   { id: 'behaviour', label: 'Driver Behaviour', icon: Shield },
   { id: 'alerts', label: 'Alerts & Safety', icon: AlertTriangle },
   { id: 'reports', label: 'Reports', icon: FileText },
+  { id: 'contracts', label: 'Contracts', icon: Handshake },
   { id: 'settings', label: 'Settings', icon: Settings }
 ];
 
+// Contractors get a read-only oriented view: only the pages that make sense for
+// a company viewing tankers/alerts shared with them during an active contract.
+// Fleet owners (and any non-contractor) see the full menu.
+const CONTRACTOR_PAGE_IDS = new Set(['dashboard', 'tracking', 'alerts', 'settings']);
+
 export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
+  const { companyType } = useCompany();
+  const visibleMenuItems = companyType === 'contractor'
+    ? menuItems.filter((item) => CONTRACTOR_PAGE_IDS.has(item.id))
+    : menuItems;
+
   return (
     <div className="w-64 h-screen bg-[#0C1E2C] border-r border-[#00E5FF]/20 flex flex-col">
       {/* Logo Section */}
@@ -35,7 +47,7 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
 
       {/* Menu Items */}
       <nav className="flex-1 p-4 space-y-2">
-        {menuItems.map((item) => {
+        {visibleMenuItems.map((item) => {
           const Icon = item.icon;
           const isActive = currentPage === item.id;
           

@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { X, Route as RouteIcon, Truck, User, Building2, Search, Flag } from 'lucide-react';
 import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { db } from '../../firebase';
+import { useCompany } from '../../contexts/CompanyContext';
 import { Route, Tanker, Driver } from '../../types';
 import { DateTimePicker } from './DateTimePicker';
 
@@ -30,6 +31,7 @@ const companyColors = {
 };
 
 export function AssignRouteModal({ routes, tankers, onClose, onAssign }: AssignRouteModalProps) {
+  const { companyId } = useCompany();
   const [formData, setFormData] = useState({
     routeId: '',
     tankerId: '',
@@ -64,9 +66,17 @@ export function AssignRouteModal({ routes, tankers, onClose, onAssign }: AssignR
   const selectedRoute = routes.find(r => r.id === formData.routeId);
   const selectedTanker = tankers.find(t => t.id === formData.tankerId);
 
-  // Fetch active drivers from Firestore
+  // Fetch active drivers from Firestore (tenant-scoped)
   useEffect(() => {
-    const q = query(collection(db, 'drivers'), where('status', '==', 'active'));
+    if (!companyId) {
+      setActiveDrivers([]);
+      return;
+    }
+    const q = query(
+      collection(db, 'drivers'),
+      where('companyId', '==', companyId),
+      where('status', '==', 'active')
+    );
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const now = new Date();
       const fetched = snapshot.docs
@@ -75,7 +85,7 @@ export function AssignRouteModal({ routes, tankers, onClose, onAssign }: AssignR
       setActiveDrivers(fetched);
     });
     return () => unsubscribe();
-  }, []);
+  }, [companyId]);
 
   // Close dropdowns on outside click
   useEffect(() => {

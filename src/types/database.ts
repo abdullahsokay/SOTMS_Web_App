@@ -191,6 +191,9 @@ export interface IncidentNote {
 }
 
 export interface IncidentDoc {
+  // Tenant owner. Optional for backward-compatibility with legacy docs; new
+  // writes must stamp it so each company only sees its own incidents.
+  companyId?: string;
   tankerId: string;
   tripId: string | null;
   alertId: string | null;

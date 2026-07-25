@@ -4,6 +4,8 @@ import { collection, addDoc } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 import { rtdb, auth, db } from '../firebase';
 import { Tanker, HatchStatus } from '../types';
+import type { CompanyType } from '../types/tenant';
+import { useCompany } from './CompanyContext';
 import { distanceToFuelPercent } from '../utils/fuelCalc';
 import { getDistanceFromLatLonInKm, getBearing, getTime } from '../utils/geo';
 
@@ -33,6 +35,25 @@ interface ESPLatestData {
     reed?: Record<string, boolean>;
     hatches?: Record<string, boolean>;
     [key: string]: unknown;
+}
+
+// ── Shape of /fleet/{tankerId}/currentStatus (written by Cloud Functions and
+//    by the fleet-owner pipeline below). Contractors read tankers from here. ──
+interface FleetCurrentStatus {
+    online?: boolean;
+    status?: string;
+    speed?: number;
+    fuelLevel?: number;
+    lastSeen?: number;
+    location?: { lat?: number; lng?: number; address?: string };
+    /** Owning fleet_owner company id. */
+    companyId?: string;
+    /** Contractor company ids currently allowed to read this tanker. */
+    visibleTo?: string[];
+}
+interface FleetNode {
+    currentStatus?: FleetCurrentStatus;
+    history?: unknown;
 }
 
 /** Extract primary fuel level (cm) from ESP data.
@@ -189,6 +210,14 @@ export function GPSProvider({ children }: { children: ReactNode }) {
     const [error, setError] = useState<string | null>(null);
     const [speedHistory, setSpeedHistory] = useState<Array<{ time: number; speed: number }>>([]);
 
+    // ── Tenancy: which company the user belongs to, and its type. Every tanker
+    //    the UI shows must be scoped to this company so tenants never see each
+    //    other's fleets. Kept in refs so the long-lived RTDB listeners below can
+    //    read the latest values without being re-created. ──
+    const { companyId, companyType } = useCompany();
+    const companyIdRef = useRef<string | null>(companyId);
+    const companyTypeRef = useRef<CompanyType | null>(companyType);
+
     const prevDataRef = useRef<Map<string, DevicePrevData>>(new Map());
     const speedHistoryRef = useRef<Array<{ time: number; speed: number }>>([]);
     const geocoderRef = useRef<google.maps.Geocoder | null>(null);
@@ -196,11 +225,32 @@ export function GPSProvider({ children }: { children: ReactNode }) {
 
     // Dynamic device→tanker mapping from /config/deviceTankerMap
     const mappingRef = useRef<Record<string, DeviceTankerMapping>>({});
+    // Device→owning-company map from /config/deviceCompany (deviceId → companyId).
+    // Fleet owners only see devices whose entry equals their own companyId.
+    const deviceCompanyRef = useRef<Record<string, string>>({});
+    // Latest raw /devices snapshot, so we can re-filter when tenancy resolves
+    // without waiting for the next ESP push.
+    const latestDevicesSnapRef = useRef<Record<string, { latest?: ESPLatestData; readings?: unknown }> | null>(null);
+    // Latest raw /fleet snapshot, used to build the contractor's read-only view.
+    const fleetRef = useRef<Record<string, FleetNode> | null>(null);
+    // Re-processing hooks so the tenancy effect can re-run the pipelines.
+    const processDevicesRef = useRef<(() => void) | null>(null);
+    const processFleetRef = useRef<(() => void) | null>(null);
     // Track which devices we already fired an offline alert for (avoid duplicates)
     const offlineAlertedRef = useRef<Set<string>>(new Set());
     // Track which device+hatch combos we already fired a hatch-open alert for (avoid spam)
     // Key format: "deviceId::hatchId"
     const hatchAlertedRef = useRef<Set<string>>(new Set());
+
+    // Keep tenancy refs fresh and re-run the pipelines whenever the company
+    // context resolves or changes — the RTDB listeners may not push again for a
+    // while, so we must re-filter with the newly known companyId/companyType.
+    useEffect(() => {
+        companyIdRef.current = companyId;
+        companyTypeRef.current = companyType;
+        processDevicesRef.current?.();
+        processFleetRef.current?.();
+    }, [companyId, companyType]);
 
     useEffect(() => {
         let isMounted = true;
@@ -215,6 +265,8 @@ export function GPSProvider({ children }: { children: ReactNode }) {
 
         let devicesRef: ReturnType<typeof ref> | null = null;
         let mapRef: ReturnType<typeof ref> | null = null;
+        let deviceCompanyListener: ReturnType<typeof ref> | null = null;
+        let fleetListener: ReturnType<typeof ref> | null = null;
 
         const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
             if (!isMounted) return;
@@ -223,26 +275,42 @@ export function GPSProvider({ children }: { children: ReactNode }) {
                 console.log('[GPSContext] Authenticated — connecting to /devices');
                 if (devicesRef) off(devicesRef);
                 if (mapRef) off(mapRef);
+                if (deviceCompanyListener) off(deviceCompanyListener);
+                if (fleetListener) off(fleetListener);
 
                 try {
-                    // ── 1. Listen to /config/deviceTankerMap for dynamic mapping ──
-                    mapRef = ref(rtdb, 'config/deviceTankerMap');
-                    onValue(mapRef, (snap) => {
-                        mappingRef.current = snap.exists()
-                            ? (snap.val() as Record<string, DeviceTankerMapping>)
-                            : {};
-                        console.log('[GPSContext] Device→Tanker mapping loaded:', Object.keys(mappingRef.current));
-                    });
-
-                    // ── 2. Listen to /devices for live ESP data ──
-                    devicesRef = ref(rtdb, 'devices');
-
-                    onValue(devicesRef, (snapshot) => {
+                    // ────────────────────────────────────────────────────────
+                    // FLEET-OWNER PIPELINE: build tankers from live ESP /devices,
+                    // scoped to the devices this company actually owns.
+                    // ────────────────────────────────────────────────────────
+                    const processDevices = () => {
                         if (!isMounted) return;
 
                         try {
                             const now = Date.now();
-                            const devicesData = snapshot.val() as Record<string, { latest?: ESPLatestData; readings?: unknown }> | null;
+                            const scopeCompanyId = companyIdRef.current;
+                            const scopeCompanyType = companyTypeRef.current;
+                            const deviceCompanyMap = deviceCompanyRef.current;
+                            const devicesData = latestDevicesSnapRef.current;
+
+                            // ── Tenancy gating ──
+                            // Still resolving which company the user belongs to →
+                            // show nothing rather than leaking every company's fleet.
+                            if (!scopeCompanyId) {
+                                setTankers([]);
+                                setRecentReadings([]);
+                                setPositionHistory([]);
+                                setLoading(false);
+                                return;
+                            }
+                            // Contractors don't own devices; their read-only tankers
+                            // come from /fleet (see processFleet). The device pipeline
+                            // yields no tankers for them — never the full fleet.
+                            if (scopeCompanyType === 'contractor') {
+                                setRecentReadings([]);
+                                setLoading(false);
+                                return;
+                            }
 
                             if (!devicesData) {
                                 console.warn('[GPSContext] /devices is empty');
@@ -273,16 +341,20 @@ export function GPSProvider({ children }: { children: ReactNode }) {
                                 liveDevices.push({ id: deviceId, data: latest, lastSeen });
                             }
 
-                            const onlineCount = liveDevices.filter(d => d.lastSeen > 0 && (now - d.lastSeen) <= OFFLINE_THRESHOLD_MS).length;
-                            const offlineCount = liveDevices.length - onlineCount;
-                            console.log(`[GPSContext] ${liveDevices.length} vehicle(s) — ${onlineCount} online, ${offlineCount} offline`);
+                            // ── Company filter: a fleet owner only sees devices its
+                            //    own company provisioned (config/deviceCompany map). ──
+                            const scopedDevices = liveDevices.filter(d => deviceCompanyMap[d.id] === scopeCompanyId);
+
+                            const onlineCount = scopedDevices.filter(d => d.lastSeen > 0 && (now - d.lastSeen) <= OFFLINE_THRESHOLD_MS).length;
+                            const offlineCount = scopedDevices.length - onlineCount;
+                            console.log(`[GPSContext] ${scopedDevices.length} vehicle(s) for company ${scopeCompanyId} — ${onlineCount} online, ${offlineCount} offline`);
 
                             // Store recent readings for the feed table
-                            setRecentReadings(liveDevices.map(d => ({ ...d.data, id: d.id })));
+                            setRecentReadings(scopedDevices.map(d => ({ ...d.data, id: d.id })));
 
                             // ── Position history (only from online devices with valid GPS) ──
                             const fullHistory: Array<{ lat: number; lng: number; timestamp: number; tankerId?: string }> = [];
-                            liveDevices.forEach(d => {
+                            scopedDevices.forEach(d => {
                                 if (!d.data.gps) return;
                                 const lat = parseFloat(String(d.data.gps.latitude));
                                 const lng = parseFloat(String(d.data.gps.longitude));
@@ -296,7 +368,7 @@ export function GPSProvider({ children }: { children: ReactNode }) {
                             // ── Build tanker objects ──
                             const newTankers: Tanker[] = [];
 
-                            for (const device of liveDevices) {
+                            for (const device of scopedDevices) {
                                 const { id: deviceId, data, lastSeen } = device;
 
                                 // ── Resolve name/driver from Firebase mapping, fallback to derived name ──
@@ -560,6 +632,158 @@ export function GPSProvider({ children }: { children: ReactNode }) {
                             console.error('[GPSContext] Data processing error:', err);
                             setLoading(false);
                         }
+                    };
+
+                    // ────────────────────────────────────────────────────────
+                    // CONTRACTOR PIPELINE: contractors own no devices. Build a
+                    // read-only tanker list from /fleet nodes whose currentStatus
+                    // .visibleTo includes this contractor's companyId.
+                    // ────────────────────────────────────────────────────────
+                    const processFleet = () => {
+                        if (!isMounted) return;
+
+                        try {
+                            const scopeCompanyId = companyIdRef.current;
+                            const scopeCompanyType = companyTypeRef.current;
+                            // Only contractors derive tankers from /fleet. Fleet
+                            // owners use the /devices pipeline above.
+                            if (scopeCompanyType !== 'contractor') return;
+
+                            if (!scopeCompanyId) {
+                                setTankers([]);
+                                setPositionHistory([]);
+                                setRecentReadings([]);
+                                setLoading(false);
+                                return;
+                            }
+
+                            const now = Date.now();
+                            const fleetData = fleetRef.current;
+
+                            // Best-effort friendly names: reverse the device→tanker
+                            // mapping (tankerId → tankerName) when available.
+                            const nameByTankerId: Record<string, string> = {};
+                            for (const m of Object.values(mappingRef.current)) {
+                                if (m?.tankerId) nameByTankerId[m.tankerId] = m.tankerName;
+                            }
+
+                            const contractorTankers: Tanker[] = [];
+                            const history: Array<{ lat: number; lng: number; timestamp: number; tankerId?: string }> = [];
+
+                            if (fleetData) {
+                                for (const [tankerId, node] of Object.entries(fleetData)) {
+                                    const cs = node?.currentStatus;
+                                    if (!cs || typeof cs !== 'object') continue;
+
+                                    const visibleTo = Array.isArray(cs.visibleTo) ? cs.visibleTo : [];
+                                    // Contractor may only read tankers explicitly
+                                    // shared with them during an active contract.
+                                    if (!visibleTo.includes(scopeCompanyId)) continue;
+
+                                    const online = cs.online === true;
+                                    const lat = typeof cs.location?.lat === 'number' ? cs.location.lat : 0;
+                                    const lng = typeof cs.location?.lng === 'number' ? cs.location.lng : 0;
+                                    const hasValidLocation = lat !== 0 || lng !== 0;
+                                    const speed = typeof cs.speed === 'number' ? cs.speed : 0;
+                                    const fuelLevel = typeof cs.fuelLevel === 'number' ? cs.fuelLevel : 0;
+                                    const lastSeen = typeof cs.lastSeen === 'number' ? cs.lastSeen : 0;
+                                    const status: Tanker['status'] = !online
+                                        ? 'offline'
+                                        : (cs.status === 'moving' ? 'moving' : 'idle');
+
+                                    contractorTankers.push({
+                                        id: tankerId,
+                                        name: nameByTankerId[tankerId] ?? tankerId,
+                                        status,
+                                        speed: online ? speed : 0,
+                                        fuelLevel,
+                                        loadWeight: 0,
+                                        driver: 'Unassigned',
+                                        driverContact: 'N/A',
+                                        location: {
+                                            lat,
+                                            lng,
+                                            address: cs.location?.address ?? (online ? 'Acquiring location...' : 'Vehicle offline'),
+                                        },
+                                        ignition: online ? 'on' : 'off',
+                                        lastUpdate: lastSeen > 0 ? new Date(lastSeen).toISOString() : new Date().toISOString(),
+                                        alerts: [],
+                                        routeDeviation: false,
+                                        satellites: 0,
+                                        fixQuality: 0,
+                                        hdop: 0,
+                                        bearing: 0,
+                                        hatches: [],
+                                    });
+
+                                    if (hasValidLocation && lat >= 23 && lat <= 37 && lng >= 60 && lng <= 78) {
+                                        history.push({ lat, lng, timestamp: lastSeen || now, tankerId });
+                                    }
+                                }
+                            }
+
+                            contractorTankers.sort((a, b) => {
+                                if (a.status === 'offline' && b.status !== 'offline') return 1;
+                                if (a.status !== 'offline' && b.status === 'offline') return -1;
+                                return a.name.localeCompare(b.name);
+                            });
+                            history.sort((a, b) => a.timestamp - b.timestamp);
+
+                            console.log(`[GPSContext] Contractor ${scopeCompanyId} — ${contractorTankers.length} shared tanker(s)`);
+
+                            setTankers(contractorTankers);
+                            setPositionHistory(history);
+                            setRecentReadings([]);
+                            setLoading(false);
+                        } catch (err) {
+                            console.error('[GPSContext] Fleet processing error:', err);
+                            setLoading(false);
+                        }
+                    };
+
+                    // Expose the pipelines so the tenancy effect can re-run them.
+                    processDevicesRef.current = processDevices;
+                    processFleetRef.current = processFleet;
+
+                    // ── 1. Listen to /config/deviceTankerMap for dynamic mapping ──
+                    mapRef = ref(rtdb, 'config/deviceTankerMap');
+                    onValue(mapRef, (snap) => {
+                        mappingRef.current = snap.exists()
+                            ? (snap.val() as Record<string, DeviceTankerMapping>)
+                            : {};
+                        console.log('[GPSContext] Device→Tanker mapping loaded:', Object.keys(mappingRef.current));
+                        // Names/drivers may have changed — refresh the contractor view.
+                        processFleet();
+                    });
+
+                    // ── 2. Listen to /config/deviceCompany for device ownership ──
+                    deviceCompanyListener = ref(rtdb, 'config/deviceCompany');
+                    onValue(deviceCompanyListener, (snap) => {
+                        deviceCompanyRef.current = snap.exists()
+                            ? (snap.val() as Record<string, string>)
+                            : {};
+                        console.log('[GPSContext] Device→Company map loaded:', Object.keys(deviceCompanyRef.current).length, 'device(s)');
+                        // Ownership changed — re-filter the fleet-owner device list.
+                        processDevices();
+                    });
+
+                    // ── 3. Listen to /fleet for the contractor read-only view ──
+                    fleetListener = ref(rtdb, 'fleet');
+                    onValue(fleetListener, (snapshot) => {
+                        if (!isMounted) return;
+                        fleetRef.current = snapshot.val() as Record<string, FleetNode> | null;
+                        processFleet();
+                    }, (err) => {
+                        console.error('[GPSContext] /fleet listener error:', err);
+                    });
+
+                    // ── 4. Listen to /devices for live ESP data ──
+                    devicesRef = ref(rtdb, 'devices');
+
+                    onValue(devicesRef, (snapshot) => {
+                        if (!isMounted) return;
+                        latestDevicesSnapRef.current = snapshot.val() as Record<string, { latest?: ESPLatestData; readings?: unknown }> | null;
+                        processDevices();
                     }, (err) => {
                         console.error('[GPSContext] RTDB listener error:', err);
                         if (isMounted) {
@@ -585,6 +809,8 @@ export function GPSProvider({ children }: { children: ReactNode }) {
             unsubscribeAuth();
             if (devicesRef) off(devicesRef);
             if (mapRef) off(mapRef);
+            if (deviceCompanyListener) off(deviceCompanyListener);
+            if (fleetListener) off(fleetListener);
             clearTimeout(safetyTimeout);
         };
     }, []);

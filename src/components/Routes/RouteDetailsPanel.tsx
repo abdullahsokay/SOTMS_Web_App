@@ -4,8 +4,9 @@ import { X, MapPin, Truck, User, Clock, Ruler, AlertTriangle, Save, Trash2, Buil
 import { StreetViewThumbnail } from '../Map/StreetViewThumbnail';
 import { StreetViewModal } from '../Map/StreetViewModal';
 import { useGPSData } from '../../hooks/useGPSData';
-import { collection, onSnapshot, query } from 'firebase/firestore';
+import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { db } from '../../firebase';
+import { useCompany } from '../../contexts/CompanyContext';
 
 interface RouteDetailsPanelProps {
   route: Route;
@@ -21,6 +22,7 @@ const companyColors = {
 };
 
 export function RouteDetailsPanel({ route, onClose, onUpdate }: RouteDetailsPanelProps) {
+  const { companyId } = useCompany();
   const { tankers } = useGPSData();
   const [isEditing, setIsEditing] = useState(false);
   const [editedRoute, setEditedRoute] = useState(route);
@@ -30,14 +32,18 @@ export function RouteDetailsPanel({ route, onClose, onUpdate }: RouteDetailsPane
     title: string;
   } | null>(null);
 
-  // Load black spots from Firebase
+  // Load black spots from Firebase (tenant-scoped)
   useEffect(() => {
-    const unsub = onSnapshot(query(collection(db, 'blackspots')), (snap) => {
+    if (!companyId) {
+      setBlackSpots([]);
+      return;
+    }
+    const unsub = onSnapshot(query(collection(db, 'blackspots'), where('companyId', '==', companyId)), (snap) => {
       const data = snap.docs.map(d => ({ id: d.id, ...d.data() } as BlackSpot));
       setBlackSpots(data);
     });
     return () => unsub();
-  }, []);
+  }, [companyId]);
 
   const assignedTanker = tankers.find(t => t.id === route.assignedTanker);
   const routeBlackSpots = blackSpots.filter(bs => (route.blackSpots ?? []).includes(bs.id));

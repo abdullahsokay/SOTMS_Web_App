@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { CheckCircle2, XCircle } from 'lucide-react';
 import { collection, onSnapshot, query, orderBy, addDoc, updateDoc, deleteDoc, doc, setDoc, getDocs, where } from 'firebase/firestore';
 import { db } from '../../firebase';
+import { useCompany } from '../../contexts/CompanyContext';
 import { useGPSData } from '../../hooks/useGPSData';
 import { useVehicleTracking } from '../../hooks/useVehicleTracking';
 import { Route, BlackSpot } from '../../types';
@@ -14,6 +15,7 @@ import { RouteNavBar } from './RouteNavBar';
 import { genId } from '../../utils/id';
 
 export function RouteManagementPage() {
+  const { companyId } = useCompany();
   const { tankers, positionHistory } = useGPSData();
   const { trackingData } = useVehicleTracking();
   const [routes, setRoutes] = useState<Route[]>([]);
@@ -27,9 +29,17 @@ export function RouteManagementPage() {
   const [showBlackSpots, setShowBlackSpots] = useState(true);
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
-  // Fetch Routes
+  // Fetch Routes (tenant-scoped)
   useEffect(() => {
-    const q = query(collection(db, 'routes'), orderBy('createdAt', 'desc'));
+    if (!companyId) {
+      setRoutes([]);
+      return;
+    }
+    const q = query(
+      collection(db, 'routes'),
+      where('companyId', '==', companyId),
+      orderBy('createdAt', 'desc')
+    );
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const fetchedRoutes = snapshot.docs.map(doc => ({
         ...doc.data(),
@@ -38,12 +48,16 @@ export function RouteManagementPage() {
       setRoutes(fetchedRoutes);
     });
     return () => unsubscribe();
-  }, []);
+  }, [companyId]);
 
   // Fetch BlackSpots (Optional, if collection exists, otherwise empty or hardcoded logic if preferred. User asked for proper connect)
   // Assuming a 'blackspots' collection exists or we create an empty one.
   useEffect(() => {
-    const q = query(collection(db, 'blackspots')); // No specific order needed
+    if (!companyId) {
+      setBlackSpots([]);
+      return;
+    }
+    const q = query(collection(db, 'blackspots'), where('companyId', '==', companyId)); // No specific order needed
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const fetchedBS = snapshot.docs.map(doc => ({
         id: doc.id,
@@ -52,7 +66,7 @@ export function RouteManagementPage() {
       setBlackSpots(fetchedBS);
     });
     return () => unsubscribe();
-  }, []);
+  }, [companyId]);
 
   const filteredRoutes = useMemo(() =>
     routes.filter(route =>
@@ -130,11 +144,17 @@ export function RouteManagementPage() {
   };
 
   const handleCreateRoute = async (newRoute: Partial<Route>) => {
+    if (!companyId) {
+      showNotification('Account setup incomplete. Cannot create route.', 'error');
+      return;
+    }
     try {
       // Strip undefined values — Firestore rejects them
       const cleanData = Object.fromEntries(
         Object.entries(newRoute).filter(([_, v]) => v !== undefined)
       );
+      // Stamp tenant owner so the route is scoped to this company
+      cleanData.companyId = companyId;
 
       if (newRoute.id) {
         await setDoc(doc(db, 'routes', newRoute.id), cleanData);
@@ -160,6 +180,10 @@ export function RouteManagementPage() {
     notes: string;
     priority: 'Low' | 'Medium' | 'High';
   }) => {
+    if (!companyId) {
+      showNotification('Account setup incomplete. Cannot assign route.', 'error');
+      return;
+    }
     try {
       const routeRef = doc(db, 'routes', assignment.routeId);
 
@@ -186,6 +210,7 @@ export function RouteManagementPage() {
         priority: assignment.priority,
         notes: assignment.notes,
         createdAt: new Date().toISOString(),
+        companyId,
       });
 
       // Update driver stats (lastAssignment + totalTrips)
@@ -193,6 +218,7 @@ export function RouteManagementPage() {
         try {
           const driversQuery = query(
             collection(db, 'drivers'),
+            where('companyId', '==', companyId),
             where('fullName', '==', assignment.driverId)
           );
           const driverSnap = await getDocs(driversQuery);

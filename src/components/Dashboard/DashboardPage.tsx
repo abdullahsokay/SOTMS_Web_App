@@ -8,21 +8,27 @@ import { FleetETAWidget } from './FleetETAWidget';
 import { PageHeader } from '../Layout/PageHeader';
 import { useGPSData } from '../../hooks/useGPSData';
 import { Route } from '../../types';
-import { collection, onSnapshot, query } from 'firebase/firestore';
+import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { db } from '../../firebase';
+import { useCompany } from '../../contexts/CompanyContext';
 
 export function DashboardPage() {
+  const { companyId } = useCompany();
   const { tankers, loading, error } = useGPSData();
   const [routes, setRoutes] = useState<Route[]>([]);
 
-  // Load routes from Firebase for FleetETAWidget
+  // Load routes from Firebase for FleetETAWidget (tenant-scoped)
   useEffect(() => {
-    const unsub = onSnapshot(query(collection(db, 'routes')), (snap) => {
+    if (!companyId) {
+      setRoutes([]);
+      return;
+    }
+    const unsub = onSnapshot(query(collection(db, 'routes'), where('companyId', '==', companyId)), (snap) => {
       const data = snap.docs.map(d => ({ id: d.id, ...d.data() } as Route));
       setRoutes(data);
     });
     return () => unsub();
-  }, []);
+  }, [companyId]);
 
   const totalTankers = tankers.length;
   const onlineTankers = tankers.filter(t => t.status !== 'offline').length;

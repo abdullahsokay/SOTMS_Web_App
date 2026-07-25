@@ -4,6 +4,7 @@ import { Tanker } from '../../types';
 import { LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import { Timestamp, collection, addDoc, query, where, getDocs } from 'firebase/firestore';
 import { db, auth } from '../../firebase';
+import { useCompany } from '../../contexts/CompanyContext';
 import { createIncident, updateActiveAlert } from '../../services/firebaseService';
 import { distanceToFuelPercent } from '../../utils/fuelCalc';
 
@@ -54,6 +55,7 @@ interface FuelDetailPanelProps {
 }
 
 export function FuelDetailPanel({ tanker, onClose, sensorReadings: rawReadings = [] }: FuelDetailPanelProps) {
+  const { companyId } = useCompany();
   // Readings are consumed defensively below (distance_cm is filtered, gps is
   // read with optional chaining). Narrow the raw source shape to the internal
   // SensorReading view the component works with — a compile-time-only cast,
@@ -146,6 +148,11 @@ export function FuelDetailPanel({ tanker, onClose, sensorReadings: rawReadings =
   // ── Raise Alert: push to RTDB activeAlerts + create a Firestore incident ──
   const handleRaiseAlert = useCallback(async () => {
     if (alertStatus === 'loading') return;
+    if (!companyId) {
+      setAlertStatus('error');
+      setTimeout(() => setAlertStatus('idle'), 3000);
+      return;
+    }
     setAlertStatus('loading');
     try {
       const isSuspicious = tanker.fuelStatus === 'Suspicious';
@@ -162,6 +169,7 @@ export function FuelDetailPanel({ tanker, onClose, sensorReadings: rawReadings =
       ].join(' | ');
 
       const result = await createIncident({
+        companyId,
         tankerId: tanker.id,
         tripId: null,
         alertId: null,
@@ -221,6 +229,7 @@ export function FuelDetailPanel({ tanker, onClose, sensorReadings: rawReadings =
       const today = new Date().toISOString().split('T')[0];
       const existingQuery = query(
         collection(db, 'reports'),
+        where('companyId', '==', companyId),
         where('tankerId', '==', tanker.id),
         where('date', '==', today)
       );
@@ -241,6 +250,7 @@ export function FuelDetailPanel({ tanker, onClose, sensorReadings: rawReadings =
           details: description,
           status: severity === 'critical' ? 'critical' : 'warning',
           source: 'manual',
+          companyId,
         });
       }
 
@@ -251,11 +261,16 @@ export function FuelDetailPanel({ tanker, onClose, sensorReadings: rawReadings =
       setAlertStatus('error');
       setTimeout(() => setAlertStatus('idle'), 3000);
     }
-  }, [alertStatus, tanker]);
+  }, [alertStatus, tanker, companyId]);
 
   // ── Record Incident: save to Firestore incidents collection ──
   const handleRecordIncident = useCallback(async () => {
     if (incidentStatus === 'loading') return;
+    if (!companyId) {
+      setIncidentStatus('error');
+      setTimeout(() => setIncidentStatus('idle'), 3000);
+      return;
+    }
     setIncidentStatus('loading');
     try {
       const incidentType = tanker.fuelLossPercent > 5
@@ -283,6 +298,7 @@ export function FuelDetailPanel({ tanker, onClose, sensorReadings: rawReadings =
       ].join(' | ');
 
       await createIncident({
+        companyId,
         tankerId: tanker.id,
         tripId: null,
         alertId: null,
@@ -325,6 +341,7 @@ export function FuelDetailPanel({ tanker, onClose, sensorReadings: rawReadings =
         duration: '-',
         details: description,
         status: reportStatus,
+        companyId,
       });
 
       setIncidentStatus('success');
@@ -334,7 +351,7 @@ export function FuelDetailPanel({ tanker, onClose, sensorReadings: rawReadings =
       setIncidentStatus('error');
       setTimeout(() => setIncidentStatus('idle'), 3000);
     }
-  }, [incidentStatus, tanker]);
+  }, [incidentStatus, tanker, companyId]);
 
   // ── Export Report: generate CSV and trigger browser download ──
   const handleExportReport = useCallback(() => {

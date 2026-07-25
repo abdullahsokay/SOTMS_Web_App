@@ -2,8 +2,9 @@ import { useState, useEffect } from 'react';
 import { Download, FileText, TrendingDown, TrendingUp } from 'lucide-react';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import { useGPSData } from '../../hooks/useGPSData';
-import { collection, query, orderBy, getDocs } from 'firebase/firestore';
+import { collection, query, orderBy, getDocs, where } from 'firebase/firestore';
 import { db } from '../../firebase';
+import { useCompany } from '../../contexts/CompanyContext';
 
 interface HistoricalPoint {
   date: string;
@@ -11,6 +12,7 @@ interface HistoricalPoint {
 }
 
 export function HistoricalAnalytics() {
+  const { companyId } = useCompany();
   const { tankers } = useGPSData();
   const [dateRange, setDateRange] = useState('24h');
   const [selectedTanker, setSelectedTanker] = useState('all');
@@ -50,26 +52,29 @@ export function HistoricalAnalytics() {
             startDate.setHours(startDate.getHours() - 24);
         }
 
-        // Query sensorReadings collection for historical data
-        // Use a simple query without composite index requirement
+        // Query sensorReadings collection for historical data (tenant-scoped).
+        // Skip entirely without a companyId — never run an unscoped query.
         let readings: any[] = [];
-        try {
-          const q = query(
-            collection(db, 'sensorReadings'),
-            orderBy('timestamp', 'asc')
-          );
+        if (companyId) {
+          try {
+            const q = query(
+              collection(db, 'sensorReadings'),
+              where('companyId', '==', companyId),
+              orderBy('timestamp', 'asc')
+            );
 
-          const snap = await getDocs(q);
-          const startMs = startDate.getTime();
-          readings = snap.docs
-            .map(d => ({ id: d.id, ...d.data() }))
-            .filter((r: any) => {
-              const ts = r.timestamp?.toDate ? r.timestamp.toDate().getTime() : new Date(r.timestamp).getTime();
-              return ts >= startMs;
-            });
-        } catch (queryErr) {
-          // Collection may not exist or no index — fall through to live data fallback
-          console.warn('[HistoricalAnalytics] sensorReadings query failed, using live data:', queryErr);
+            const snap = await getDocs(q);
+            const startMs = startDate.getTime();
+            readings = snap.docs
+              .map(d => ({ id: d.id, ...d.data() }))
+              .filter((r: any) => {
+                const ts = r.timestamp?.toDate ? r.timestamp.toDate().getTime() : new Date(r.timestamp).getTime();
+                return ts >= startMs;
+              });
+          } catch (queryErr) {
+            // Collection may not exist or no index — fall through to live data fallback
+            console.warn('[HistoricalAnalytics] sensorReadings query failed, using live data:', queryErr);
+          }
         }
 
         if (readings.length > 0) {
@@ -177,7 +182,7 @@ export function HistoricalAnalytics() {
     }
 
     fetchHistoricalData();
-  }, [tankers, dateRange]);
+  }, [tankers, dateRange, companyId]);
 
   const handleExport = (format: string) => {
     console.log(`Exporting as ${format}...`);

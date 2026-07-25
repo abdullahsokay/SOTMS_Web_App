@@ -20,6 +20,7 @@
 import { setGlobalOptions } from 'firebase-functions/v2';
 import { onValueWritten } from 'firebase-functions/v2/database';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
+import { onDocumentWritten } from 'firebase-functions/v2/firestore';
 import * as logger from 'firebase-functions/logger';
 import * as admin from 'firebase-admin';
 
@@ -79,6 +80,10 @@ interface CanonicalAlert {
   location: { lat: number; lng: number; address: string };
   sensorData?: Record<string, unknown>;
   createdAt: FirebaseFirestore.Timestamp;
+  /** Owning fleet_owner company — required so the alert is readable under rules. */
+  companyId: string;
+  /** Contractor company ids allowed to read this alert (Option A). Omitted if empty. */
+  visibleTo?: string[];
 }
 
 /**
@@ -139,6 +144,68 @@ async function resolveMapping(
   return null;
 }
 
+/**
+ * Resolve the owning fleet_owner company for a device from the RTDB mapping
+ * that provisionDevice writes at config/deviceCompany/{deviceId}. Returns the
+ * company id string, or null when the device is unprovisioned/unmapped.
+ */
+async function companyOf(deviceId: string): Promise<string | null> {
+  try {
+    const snap = await rtdb.ref(`config/deviceCompany/${deviceId}`).get();
+    const val = snap.val();
+    return typeof val === 'string' && val.trim() !== '' ? val : null;
+  } catch (err) {
+    logger.warn(`could not read config/deviceCompany for ${deviceId}`, err);
+    return null;
+  }
+}
+
+/**
+ * Compute the contractor companies that may currently read a given tanker's
+ * live data (Option A — active-contract-only visibility). Queries the Firestore
+ * `contracts` collection for ACTIVE contracts owned by `companyId`, then returns
+ * the deduped contractorCompanyId of every contract whose `tankerIds` includes
+ * `tankerId`. Defensive: any read failure yields [] (no over-sharing).
+ */
+async function contractorsFor(
+  companyId: string,
+  tankerId: string,
+  deviceId: string,
+): Promise<string[]> {
+  try {
+    const qs = await fs
+      .collection('contracts')
+      .where('fleetOwnerCompanyId', '==', companyId)
+      .where('active', '==', true)
+      .get();
+
+    const out = new Set<string>();
+    for (const doc of qs.docs) {
+      const data = doc.data() as {
+        tankerIds?: unknown;
+        contractorCompanyId?: unknown;
+      };
+      const tankerIds = Array.isArray(data.tankerIds) ? data.tankerIds : [];
+      // The app stores tankers by deviceId; the fleet/tanker uses mapping.tankerId.
+      // Match either so a contract works regardless of which id the UI captured.
+      if (
+        (tankerIds.includes(tankerId) || tankerIds.includes(deviceId)) &&
+        typeof data.contractorCompanyId === 'string' &&
+        data.contractorCompanyId.trim() !== ''
+      ) {
+        out.add(data.contractorCompanyId);
+      }
+    }
+    return Array.from(out);
+  } catch (err) {
+    logger.warn(
+      `could not resolve contractors for company ${companyId} / tanker ${tankerId}`,
+      err,
+    );
+    return [];
+  }
+}
+
 /** Parse a GPS block into a validated {lat,lng} or null (rejects junk/0,0/out-of-region). */
 function parseValidGps(
   gps: EspLatestData['gps'],
@@ -174,6 +241,14 @@ export const onDeviceData = onValueWritten(
     const mapping = await resolveMapping(deviceId);
     const tankerId = mapping?.tankerId || deviceId;
     const tankerName = mapping?.tankerName || fallbackTankerName(deviceId);
+
+    // ── Resolve multi-tenant scoping (owning company + contractor visibility) ──
+    // companyId is the owning fleet_owner; visibleTo lists contractor companies
+    // that may currently read this tanker via an active contract (Option A).
+    const companyId = await companyOf(deviceId);
+    const visibleTo = companyId
+      ? await contractorsFor(companyId, tankerId, deviceId)
+      : [];
 
     // ── Parse sensor fields (defensive) ──
     const distanceCm = getFuelLevelCm(after);
@@ -228,26 +303,51 @@ export const onDeviceData = onValueWritten(
       hasGps && speed > MOVING_SPEED_THRESHOLD_KMH ? 'moving' : 'idle';
 
     // ── Update /fleet/{tankerId}/currentStatus ──
-    await rtdb.ref(`fleet/${tankerId}/currentStatus`).update({
+    // Stamp companyId/visibleTo so sweepStaleDevices (which only sees RTDB) can
+    // scope the offline alert it later raises. Omit undefined/empty fields —
+    // RTDB update() rejects undefined values.
+    const statusUpdate: Record<string, unknown> = {
       online: true,
       status,
       speed: speedRounded,
       fuelLevel: fuelPercent,
       lastSeen: nowMs,
       location: { lat: locLat, lng: locLng, address },
-    });
+    };
+    if (companyId) statusUpdate.companyId = companyId;
+    if (visibleTo.length > 0) statusUpdate.visibleTo = visibleTo;
+    await rtdb.ref(`fleet/${tankerId}/currentStatus`).update(statusUpdate);
 
     // ── Append history record to Firestore sensorReadings ──
-    await fs.collection('sensorReadings').add({
+    // Company-scope the audit record. Omit companyId/visibleTo when absent —
+    // Firestore rejects undefined fields.
+    const reading: Record<string, unknown> = {
       deviceId,
       tankerId,
       timestamp: admin.firestore.Timestamp.fromMillis(nowMs),
       gps: hasGps ? { latitude: gps.lat, longitude: gps.lng } : null,
       fuelLevel: fuelPercent,
       distance_cm: distanceCm,
-    });
+    };
+    if (companyId) reading.companyId = companyId;
+    if (visibleTo.length > 0) reading.visibleTo = visibleTo;
+    await fs.collection('sensorReadings').add(reading);
 
     // ── Detection ──────────────────────────────────────────────────────────
+
+    // Alerts MUST carry a companyId to be readable under firestore.rules
+    // (owns(resource) / sharedTo(resource)). An unmapped/unprovisioned device
+    // has no owning company, so writing an alert would produce an orphan doc no
+    // one could read. Live fleet status + sensorReadings above still happen;
+    // only the alert writes are skipped here. From this point companyId is a
+    // non-null string.
+    if (!companyId) {
+      logger.warn(
+        `device ${deviceId} (tanker ${tankerId}) is unmapped ` +
+          `(no config/deviceCompany entry) — skipping alert writes`,
+      );
+      return;
+    }
 
     // (a) Hatch/reed open while OUTSIDE every authorized zone → critical.
     //     Only alert on the transition (was-not-open → open) to mirror the
@@ -279,6 +379,8 @@ export const onDeviceData = onValueWritten(
               tankerId,
               tankerName,
               deviceId,
+              companyId,
+              ...(visibleTo.length > 0 ? { visibleTo } : {}),
               timestamp: new Date(nowMs).toISOString(),
               severity: 'critical',
               status: 'unacknowledged',
@@ -316,6 +418,8 @@ export const onDeviceData = onValueWritten(
         tankerId,
         tankerName,
         deviceId,
+        companyId,
+        ...(visibleTo.length > 0 ? { visibleTo } : {}),
         timestamp: new Date(nowMs).toISOString(),
         severity: 'warning',
         status: 'unacknowledged',
@@ -349,6 +453,8 @@ export const sweepStaleDevices = onSchedule(
           online?: boolean;
           lastSeen?: number;
           location?: { lat?: number; lng?: number; address?: string };
+          companyId?: string;
+          visibleTo?: string[];
         };
         info?: { name?: string; deviceId?: string };
       }
@@ -372,12 +478,28 @@ export const sweepStaleDevices = onSchedule(
       const tankerName = node?.info?.name || fallbackTankerName(tankerId);
       const deviceId = node?.info?.deviceId || tankerId;
 
-      // Flip to offline.
+      // Flip to offline. (RTDB status — not company-scoped, always applied.)
       await rtdb.ref(`fleet/${tankerId}/currentStatus`).update({
         online: false,
         status: 'offline',
         speed: 0,
       });
+
+      // Multi-tenant scoping was stamped onto currentStatus by onDeviceData.
+      // Without a companyId the alert would be unreadable under rules, so skip
+      // it (the device is still flipped offline above).
+      const companyId =
+        typeof cs.companyId === 'string' && cs.companyId.trim() !== ''
+          ? cs.companyId
+          : null;
+      if (!companyId) {
+        logger.warn(
+          `tanker ${tankerId} has no companyId on currentStatus — ` +
+            `skipping offline alert (device unmapped)`,
+        );
+        continue;
+      }
+      const visibleTo = Array.isArray(cs.visibleTo) ? cs.visibleTo : [];
 
       // ONE-TIME offline alert: id keyed on lastSeen so each distinct offline
       // episode yields exactly one alert (repeated sweeps → same id → no dup).
@@ -389,6 +511,8 @@ export const sweepStaleDevices = onSchedule(
         tankerId,
         tankerName,
         deviceId,
+        companyId,
+        ...(visibleTo.length > 0 ? { visibleTo } : {}),
         timestamp: new Date(nowMs).toISOString(),
         severity: 'warning',
         status: 'unacknowledged',
@@ -445,6 +569,128 @@ export const pruneHistory = onSchedule(
     logger.info(
       `pruneHistory: deleted ${totalDeleted} sensorReadings older than ` +
         `${HISTORY_RETENTION_DAYS} days`,
+    );
+  },
+);
+
+// ─────────────────────────────────────────────────────────────────────────
+//  4. onContractWrite — share EXISTING tanker data when a contract activates
+//     (and un-share when it is paused/deleted). Backfills `visibleTo` on the
+//     fleet owner's alerts/incidents/reports for the contracted tankers, plus
+//     the RTDB fleet node, so both parties immediately see the shipment's
+//     history — not just data generated after the contract.
+// ─────────────────────────────────────────────────────────────────────────
+
+/** Resolve a contract tanker ref (the app stores deviceId) to the set of ids
+ *  its records might carry: the ref itself + the mapped tankerId. */
+async function idSetForRef(ref: string): Promise<string[]> {
+  const set = new Set<string>([ref]);
+  try {
+    const snap = await rtdb.ref(`config/deviceTankerMap/${ref}`).get();
+    const mapped = snap.val()?.tankerId;
+    if (typeof mapped === 'string' && mapped.trim() !== '') set.add(mapped);
+  } catch {
+    /* best-effort */
+  }
+  return Array.from(set);
+}
+
+/** Does a record's tankerId/deviceId belong to any of the contract's ids?
+ *  Also matches composite legacy tankerIds like `SOTMS_ESP32_001_2026-...`
+ *  by prefix, so old incidents get shared too. */
+function recordMatches(
+  tankerId: unknown,
+  deviceId: unknown,
+  ids: string[],
+): boolean {
+  const tid = typeof tankerId === 'string' ? tankerId : '';
+  const did = typeof deviceId === 'string' ? deviceId : '';
+  return ids.some(
+    (id) => tid === id || did === id || (tid !== '' && tid.startsWith(id)),
+  );
+}
+
+export const onContractWrite = onDocumentWritten(
+  { document: 'contracts/{contractId}', region: REGION },
+  async (event) => {
+    const before = event.data?.before?.exists ? event.data.before.data() : null;
+    const after = event.data?.after?.exists ? event.data.after.data() : null;
+
+    const contractorId = (after?.contractorCompanyId ??
+      before?.contractorCompanyId) as string | undefined;
+    const fleetOwnerId = (after?.fleetOwnerCompanyId ??
+      before?.fleetOwnerCompanyId) as string | undefined;
+    if (!contractorId || !fleetOwnerId) return;
+
+    const beforeTankers: string[] = Array.isArray(before?.tankerIds)
+      ? (before!.tankerIds as string[])
+      : [];
+    const afterTankers: string[] = Array.isArray(after?.tankerIds)
+      ? (after!.tankerIds as string[])
+      : [];
+    const refs = Array.from(new Set([...beforeTankers, ...afterTankers]));
+    if (refs.length === 0) return;
+
+    // Share while the contract exists AND is active; otherwise un-share.
+    const share = !!after && after.active === true;
+
+    // Build the full id set (deviceIds + mapped tankerIds) to match records.
+    const ids = new Set<string>();
+    const fleetKeys = new Set<string>();
+    for (const ref of refs) {
+      const set = await idSetForRef(ref);
+      set.forEach((x) => ids.add(x));
+      // fleet nodes are keyed by the mapped tankerId when present, else the ref
+      fleetKeys.add(set.length > 1 ? set[1] : ref);
+    }
+    const idList = Array.from(ids);
+
+    const op = share
+      ? admin.firestore.FieldValue.arrayUnion(contractorId)
+      : admin.firestore.FieldValue.arrayRemove(contractorId);
+
+    // Backfill the fleet owner's Firestore records for the contracted tankers.
+    let touched = 0;
+    for (const col of ['alerts', 'incidents', 'reports']) {
+      const qs = await fs
+        .collection(col)
+        .where('companyId', '==', fleetOwnerId)
+        .get();
+      let batch = fs.batch();
+      let n = 0;
+      for (const doc of qs.docs) {
+        const d = doc.data();
+        if (recordMatches(d.tankerId, d.deviceId, idList)) {
+          batch.update(doc.ref, { visibleTo: op });
+          touched++;
+          if (++n >= 400) {
+            await batch.commit();
+            batch = fs.batch();
+            n = 0;
+          }
+        }
+      }
+      if (n > 0) await batch.commit();
+    }
+
+    // Backfill the RTDB fleet nodes so the contractor's live map includes them.
+    for (const key of fleetKeys) {
+      try {
+        const vRef = rtdb.ref(`fleet/${key}/currentStatus/visibleTo`);
+        const cur = (await vRef.get()).val();
+        const arr: string[] = Array.isArray(cur) ? cur : [];
+        const next = share
+          ? Array.from(new Set([...arr, contractorId]))
+          : arr.filter((x) => x !== contractorId);
+        await vRef.set(next);
+      } catch (err) {
+        logger.warn(`onContractWrite: failed fleet visibleTo for ${key}`, err);
+      }
+    }
+
+    logger.info(
+      `onContractWrite: ${share ? 'shared' : 'unshared'} ${touched} records + ` +
+        `${fleetKeys.size} fleet nodes with contractor ${contractorId}`,
     );
   },
 );

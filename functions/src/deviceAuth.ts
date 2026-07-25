@@ -57,6 +57,14 @@ export const provisionDevice = onCall({ region: REGION }, async (req) => {
     throw new HttpsError('permission-denied', 'Admin role required.');
   }
 
+  // Multi-tenant: the device is owned by the admin's company. Every record the
+  // device later generates (live status, sensorReadings, alerts) is stamped
+  // with this companyId so it is scoped/shareable under firestore.rules.
+  const companyId = userSnap.get('companyId');
+  if (typeof companyId !== 'string' || companyId.trim() === '') {
+    throw new HttpsError('failed-precondition', 'Your account has no company');
+  }
+
   const deviceId = String(req.data?.deviceId ?? '').trim();
   if (!DEVICE_ID_RE.test(deviceId)) {
     throw new HttpsError(
@@ -70,12 +78,19 @@ export const provisionDevice = onCall({ region: REGION }, async (req) => {
 
   await admin.firestore().doc(`deviceSecrets/${deviceId}`).set({
     secretHash: hashSecret(secret),
+    companyId,
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
     createdBy: uid,
     revoked: false,
   });
 
-  logger.info(`device provisioned: ${deviceId} by admin ${uid}`);
+  // Mirror the mapping into RTDB so the RTDB-triggered onDeviceData handler can
+  // resolve the owning company with a single fast read (no Firestore round-trip).
+  await admin.database().ref(`config/deviceCompany/${deviceId}`).set(companyId);
+
+  logger.info(
+    `device provisioned: ${deviceId} by admin ${uid} for company ${companyId}`,
+  );
 
   // Plaintext secret is returned ONCE — it is never stored and cannot be
   // recovered. Flash it to the device now; re-provision to rotate.

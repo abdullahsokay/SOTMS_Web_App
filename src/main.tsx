@@ -7,19 +7,22 @@ import { GPSProvider } from './contexts/GPSContext';
 import { GoogleMapsProvider } from './contexts/GoogleMapsContext';
 import { ThemeProvider } from './contexts/ThemeContext';
 import { AlertsProvider } from './contexts/AlertsContext';
+import { CompanyProvider } from './contexts/CompanyContext';
 import { ErrorBoundary } from './components/ErrorBoundary';
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <ErrorBoundary>
       <ThemeProvider>
-        <GPSProvider>
-          <GoogleMapsProvider>
-            <AlertsProvider>
-              <App />
-            </AlertsProvider>
-          </GoogleMapsProvider>
-        </GPSProvider>
+        <CompanyProvider>
+          <GPSProvider>
+            <GoogleMapsProvider>
+              <AlertsProvider>
+                <App />
+              </AlertsProvider>
+            </GoogleMapsProvider>
+          </GPSProvider>
+        </CompanyProvider>
       </ThemeProvider>
     </ErrorBoundary>
   </StrictMode>

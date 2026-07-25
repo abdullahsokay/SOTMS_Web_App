@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
 import { FileText, Calendar, Download, Loader2, X, AlertTriangle, Clock, Truck, Activity, Copy, CheckCircle } from 'lucide-react';
-import { collection, onSnapshot, query, orderBy, limit, deleteDoc, doc } from 'firebase/firestore';
+import { collection, onSnapshot, query, orderBy, limit, deleteDoc, doc, where } from 'firebase/firestore';
 import { db } from '../../firebase';
+import { useCompany } from '../../contexts/CompanyContext';
 import { Report } from '../../types';
 
 export function ReportsPage() {
+  const { companyId } = useCompany();
   const [reports, setReports] = useState<Report[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedType, setSelectedType] = useState<string>('all');
@@ -15,7 +17,17 @@ export function ReportsPage() {
   const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
-    const q = query(collection(db, 'reports'), orderBy('date', 'desc'), limit(100));
+    if (!companyId) {
+      setReports([]);
+      setLoading(false);
+      return;
+    }
+    const q = query(
+      collection(db, 'reports'),
+      where('companyId', '==', companyId),
+      orderBy('date', 'desc'),
+      limit(100)
+    );
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const fetchedReports = snapshot.docs.map(doc => ({
         id: doc.id,
@@ -28,7 +40,7 @@ export function ReportsPage() {
       setLoading(false);
     });
     return () => unsubscribe();
-  }, []);
+  }, [companyId]);
 
   // Dynamically build filter tabs from actual report types in the data
   const reportTypes = ['all', ...Array.from(new Set(reports.map(r => r.type))).sort()];

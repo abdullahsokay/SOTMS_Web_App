@@ -2,9 +2,10 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { Shield, AlertTriangle, Gauge, Clock, TrendingDown, Navigation, Search, Download, ChevronDown, ChevronUp } from 'lucide-react';
 import { PageHeader } from '../Layout/PageHeader';
 import { useGPSData } from '../../hooks/useGPSData';
-import { collection, onSnapshot, query } from 'firebase/firestore';
+import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { ref, onValue, push, set, off } from 'firebase/database';
 import { db, rtdb } from '../../firebase';
+import { useCompany } from '../../contexts/CompanyContext';
 import { Driver, Route } from '../../types';
 import { XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts';
 
@@ -89,6 +90,7 @@ function timeAgo(ts: number): string {
 // ── Component ──
 
 export function DriverBehaviourPage() {
+  const { companyId } = useCompany();
   const { tankers } = useGPSData();
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [routes, setRoutes] = useState<Route[]>([]);
@@ -104,21 +106,29 @@ export function DriverBehaviourPage() {
   const idleStartRef = useRef<Map<string, number>>(new Map());
   const firedEventsRef = useRef<Set<string>>(new Set()); // dedup key: type-tankerId-minute
 
-  // ── Load drivers from Firestore ──
+  // ── Load drivers from Firestore (tenant-scoped) ──
   useEffect(() => {
-    const unsub = onSnapshot(query(collection(db, 'drivers')), (snap) => {
+    if (!companyId) {
+      setDrivers([]);
+      return;
+    }
+    const unsub = onSnapshot(query(collection(db, 'drivers'), where('companyId', '==', companyId)), (snap) => {
       setDrivers(snap.docs.map(d => ({ id: d.id, ...d.data() } as Driver)));
     });
     return () => unsub();
-  }, []);
+  }, [companyId]);
 
-  // ── Load routes from Firestore ──
+  // ── Load routes from Firestore (tenant-scoped) ──
   useEffect(() => {
-    const unsub = onSnapshot(query(collection(db, 'routes')), (snap) => {
+    if (!companyId) {
+      setRoutes([]);
+      return;
+    }
+    const unsub = onSnapshot(query(collection(db, 'routes'), where('companyId', '==', companyId)), (snap) => {
       setRoutes(snap.docs.map(d => ({ id: d.id, ...d.data() } as Route)));
     });
     return () => unsub();
-  }, []);
+  }, [companyId]);
 
   // ── Load persisted events from RTDB ──
   useEffect(() => {

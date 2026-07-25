@@ -1,7 +1,8 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { ZoomIn, ZoomOut, TrafficCone, Signal } from 'lucide-react';
-import { collection, onSnapshot, query } from 'firebase/firestore';
+import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { db } from '../../firebase';
+import { useCompany } from '../../contexts/CompanyContext';
 import { Tanker, Route, NearbyFacility } from '../../types';
 import { PathTimeRange } from '../../types/tracking';
 import { useGPSData } from '../../hooks/useGPSData';
@@ -16,6 +17,7 @@ import { MapView } from './MapView';
 import { TrackingNavBar } from './TrackingNavBar';
 
 export function LiveTrackingPage() {
+  const { companyId } = useCompany();
   const { tankers, positionHistory, speedHistory, loading, error } = useGPSData();
   const { trackingData } = useVehicleTracking();
   const [selectedTanker, setSelectedTanker] = useState<Tanker | null>(null);
@@ -38,14 +40,18 @@ export function LiveTrackingPage() {
   const [pathTimeRange, setPathTimeRange] = useState<PathTimeRange>('24h');
   const [selectedFuelStation, setSelectedFuelStation] = useState<NearbyFacility | null>(null);
 
-  // Load routes for ETA/deviation context
+  // Load routes for ETA/deviation context (tenant-scoped)
   useEffect(() => {
-    const q = query(collection(db, 'routes'));
+    if (!companyId) {
+      setRoutes([]);
+      return;
+    }
+    const q = query(collection(db, 'routes'), where('companyId', '==', companyId));
     const unsub = onSnapshot(q, (snap) => {
       setRoutes(snap.docs.map(d => ({ ...d.data(), id: d.id } as Route)));
     });
     return () => unsub();
-  }, []);
+  }, [companyId]);
 
   // GPS Path History hooks
   const {
